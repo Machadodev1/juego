@@ -4,23 +4,20 @@ import {
   Copy,
   LogOut,
   Play,
-  Shuffle,
   ShieldCheck,
   Users,
 } from "lucide-react";
-import type { ArenaTheme, PlayerState } from "@shared/types";
-import { NEON_COLORS, THEME_META, THEME_ORDER } from "../constants";
+import type { AbilityType, PlayerState } from "@shared/types";
+import { ABILITY_META, ABILITY_ORDER, NEON_COLORS } from "../constants";
 
 interface LobbyScreenProps {
   roomCode: string;
   sessionId: string;
   players: Record<string, PlayerState>;
-  theme: ArenaTheme;
-  preferredTheme: string;
-  onSelectTheme: (theme: string) => void;
   onToggleReady: () => void;
   onStartGame: () => void;
   onUpdateColor: (color: string) => void;
+  onUpdateAbility: (ability: AbilityType) => void;
   onLeaveRoom: () => void;
 }
 
@@ -28,12 +25,10 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   roomCode,
   sessionId,
   players,
-  theme,
-  preferredTheme,
-  onSelectTheme,
   onToggleReady,
   onStartGame,
   onUpdateColor,
+  onUpdateAbility,
   onLeaveRoom,
 }) => {
   const [copied, setCopied] = useState(false);
@@ -54,13 +49,13 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   };
 
   return (
-    <div className="relative flex h-full w-full justify-center overflow-y-auto bg-slate-950 bg-neon-grid px-4 py-8">
-      <div className="pointer-events-none fixed left-1/3 top-1/4 h-72 w-72 rounded-full bg-cyan-500/10 blur-3xl" />
+    <div className="relative flex h-full w-full justify-center overflow-y-auto bg-slate-950 bg-neon-grid px-4 py-6">
+      <div className="pointer-events-none fixed left-1/3 top-1/4 h-72 w-72 rounded-full bg-amber-500/10 blur-3xl" />
 
-      <div className="relative z-10 my-auto w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900/90 p-7 shadow-2xl backdrop-blur-xl">
-        <div className="mb-6 flex items-center justify-between">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-slate-400">
-            <Users className="h-4 w-4 text-cyan-400" />
+      <div className="relative z-10 my-auto w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900/92 p-6 shadow-2xl backdrop-blur-xl sm:p-7">
+        <div className="mb-5 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-slate-400">
+            <Users className="h-4 w-4 text-amber-400" />
             Sala de Espera ({playerList.length}/4)
           </div>
           <button
@@ -73,17 +68,17 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           </button>
         </div>
 
-        <div className="mb-5 rounded-2xl border border-cyan-500/30 bg-slate-950/80 p-5 text-center">
+        <div className="mb-5 rounded-2xl border border-amber-500/30 bg-slate-950/80 p-4 text-center">
           <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-400">
             Código de Sala
           </p>
-          <div className="mt-1 font-mono text-4xl font-black tracking-[0.28em] text-cyan-300">
+          <div className="mt-1 font-mono text-4xl font-black tracking-[0.28em] text-amber-300">
             {roomCode || "----"}
           </div>
           <button
             type="button"
             onClick={handleCopyInvite}
-            className="mt-4 inline-flex items-center gap-2 rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-4 py-2 text-xs font-bold text-cyan-300 transition hover:bg-cyan-500/20"
+            className="mt-3 inline-flex items-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-xs font-bold text-amber-300 transition hover:bg-amber-500/20"
           >
             {copied ? (
               <>
@@ -99,89 +94,43 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           </button>
         </div>
 
-        {/* Selector de mapa */}
-        <div className="mb-5">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Mapa
-            </span>
-            <span className="text-[11px] font-semibold text-slate-500">
-              Próximo: {THEME_META[theme]?.emoji} {THEME_META[theme]?.label}
-            </span>
-          </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-            <button
-              type="button"
-              onClick={() => onSelectTheme("random")}
-              className={`flex flex-col items-center gap-1 rounded-xl border px-2 py-2 text-[11px] font-bold transition ${
-                preferredTheme === "random"
-                  ? "border-white bg-slate-800/90 text-white"
-                  : "border-slate-800 bg-slate-950/60 text-slate-300 hover:border-slate-600"
-              }`}
-            >
-              <Shuffle className="h-4 w-4" />
-              Aleatorio
-            </button>
-            {THEME_ORDER.map((t) => {
-              const meta = THEME_META[t];
-              const active = preferredTheme === t;
-              return (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => onSelectTheme(t)}
-                  title={meta.desc}
-                  className={`flex flex-col items-center gap-1 rounded-xl border px-2 py-2 text-[11px] font-bold transition ${
-                    active
-                      ? "border-white bg-slate-800/90 text-white"
-                      : "border-slate-800 bg-slate-950/60 text-slate-300 hover:border-slate-600"
-                  }`}
-                >
-                  <span
-                    className="h-4 w-8 rounded border border-white/30"
-                    style={{ backgroundColor: meta.swatch }}
-                  />
-                  <span className="max-w-full truncate">
-                    {meta.emoji} {meta.label.split(" ")[0]}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="mb-5 space-y-2.5">
+        <div className="mb-4 space-y-2">
           {playerList.map((player) => {
             const isMe = player.id === sessionId;
+            const abMeta =
+              ABILITY_META[player.ability] || ABILITY_META.dash;
             return (
               <div
                 key={player.id}
-                className={`flex items-center justify-between rounded-xl border px-4 py-3 transition ${
+                className={`flex items-center justify-between rounded-xl border px-3.5 py-2.5 transition ${
                   isMe
-                    ? "border-cyan-500/40 bg-slate-800/80"
+                    ? "border-amber-400/40 bg-slate-800/80"
                     : "border-slate-800 bg-slate-950/60"
                 }`}
               >
-                <div className="flex items-center gap-3">
+                <div className="flex min-w-0 items-center gap-2.5">
                   <span
-                    className="h-4 w-4 rounded-full border border-white/40"
+                    className="h-4 w-4 shrink-0 rounded-full border border-white/40"
                     style={{
                       backgroundColor: player.color,
                       boxShadow: `0 0 10px ${player.color}`,
                     }}
                   />
-                  <span className="text-sm font-bold text-white">
+                  <span className="truncate text-sm font-bold text-white">
                     {player.name}
                   </span>
                   {isMe && (
-                    <span className="rounded-md bg-cyan-500/20 px-1.5 py-0.5 text-[10px] font-bold uppercase text-cyan-300">
+                    <span className="rounded-md bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-300">
                       Tú
                     </span>
                   )}
+                  <span className="rounded-md border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] font-semibold text-slate-300">
+                    {abMeta.emoji} {abMeta.label.split(" ")[0]}
+                  </span>
                 </div>
 
                 <span
-                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold ${
+                  className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold ${
                     player.ready
                       ? "border border-emerald-500/30 bg-emerald-500/15 text-emerald-300"
                       : "border border-slate-700 bg-slate-800 text-slate-400"
@@ -202,29 +151,61 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
         </div>
 
         {localPlayer && (
-          <div className="mb-5 flex items-center justify-between rounded-xl border border-slate-800 bg-slate-950/50 px-4 py-2.5">
-            <span className="text-xs font-semibold text-slate-400">
-              Cambiar color:
-            </span>
-            <div className="flex items-center gap-2">
-              {NEON_COLORS.map((c) => {
-                const active =
-                  localPlayer.color.toUpperCase() === c.hex.toUpperCase();
-                return (
-                  <button
-                    key={c.hex}
-                    type="button"
-                    onClick={() => onUpdateColor(c.hex)}
-                    title={c.name}
-                    className={`h-5 w-5 rounded-full border transition ${
-                      active
-                        ? "scale-125 border-white"
-                        : "border-white/25 opacity-70 hover:opacity-100"
-                    }`}
-                    style={{ backgroundColor: c.hex }}
-                  />
-                );
-              })}
+          <div className="mb-5 space-y-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-400">
+                Color del personaje:
+              </span>
+              <div className="flex items-center gap-2">
+                {NEON_COLORS.map((c) => {
+                  const active =
+                    localPlayer.color.toUpperCase() === c.hex.toUpperCase();
+                  return (
+                    <button
+                      key={c.hex}
+                      type="button"
+                      onClick={() => onUpdateColor(c.hex)}
+                      title={c.name}
+                      className={`h-5 w-5 rounded-full border transition ${
+                        active
+                          ? "scale-125 border-white"
+                          : "border-white/25 opacity-70 hover:opacity-100"
+                      }`}
+                      style={{ backgroundColor: c.hex }}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+
+            <div>
+              <span className="mb-1.5 block text-xs font-bold text-slate-400">
+                Tu Habilidad Activa:
+              </span>
+              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+                {ABILITY_ORDER.map((abId) => {
+                  const meta = ABILITY_META[abId];
+                  const active = localPlayer.ability === abId;
+                  return (
+                    <button
+                      key={abId}
+                      type="button"
+                      onClick={() => onUpdateAbility(abId)}
+                      title={meta.desc}
+                      className={`flex flex-col items-center gap-0.5 rounded-lg border px-2 py-1.5 text-[11px] font-bold transition ${
+                        active
+                          ? "border-amber-400 bg-slate-800 text-white"
+                          : "border-slate-800 bg-slate-900/70 text-slate-400 hover:border-slate-600"
+                      }`}
+                    >
+                      <span className="text-base">{meta.emoji}</span>
+                      <span className="max-w-full truncate">
+                        {meta.label.split(" ")[0]}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
         )}
@@ -233,10 +214,10 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           <button
             type="button"
             onClick={onToggleReady}
-            className={`flex items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold transition ${
+            className={`flex items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-black transition ${
               localPlayer?.ready
                 ? "border border-emerald-400/50 bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30"
-                : "bg-cyan-500 text-slate-950 hover:bg-cyan-400"
+                : "bg-amber-400 text-slate-950 hover:bg-amber-300"
             }`}
           >
             <ShieldCheck className="h-4 w-4" />
@@ -247,7 +228,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
             type="button"
             disabled={!canStart}
             onClick={onStartGame}
-            className="flex items-center justify-center gap-2 rounded-xl border border-pink-500/50 bg-pink-500/20 px-4 py-3 text-sm font-bold text-pink-200 transition hover:bg-pink-500/30 disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex items-center justify-center gap-2 rounded-xl border border-cyan-500/50 bg-cyan-500/20 px-4 py-3 text-sm font-bold text-cyan-200 transition hover:bg-cyan-500/30 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Play className="h-4 w-4" />
             {canStart ? "Iniciar Partida" : "Mínimo 2 Jugadores"}

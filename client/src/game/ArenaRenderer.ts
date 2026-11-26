@@ -1,978 +1,726 @@
-import { Container, Graphics, Text } from "pixi.js";
+import { Container, Graphics, Text, TextStyle } from "pixi.js";
 import type {
-  ArenaTheme,
+  HazardZoneState,
   LootItemState,
   ObstacleState,
+  PlayerState,
   WeaponType,
 } from "@shared/types";
 import { WEAPON_META } from "../constants";
+import { hexToNumber } from "./Interpolation";
 
-/* ------------------------------------------------------------------ */
-/* Paletas por tema                                                    */
-/* ------------------------------------------------------------------ */
-
-export interface ThemeStyle {
-  background: string;
-  outside: number;
-  minimapBg: number;
-  minimapRock: number;
-  minimapFlora: number;
-  minimapCrate: number;
-}
-
-export const THEME_STYLE: Record<ArenaTheme, ThemeStyle> = {
-  cyber_outpost: {
-    background: "#0a1220",
-    outside: 0x0a1220,
-    minimapBg: 0x0b1a2b,
-    minimapRock: 0x64748b,
-    minimapFlora: 0x22d3ee,
-    minimapCrate: 0xfacc15,
-  },
-  midnight: {
-    background: "#050a14",
-    outside: 0x050a14,
-    minimapBg: 0x0a1426,
-    minimapRock: 0x8b5cf6,
-    minimapFlora: 0x2dd4bf,
-    minimapCrate: 0x5eead4,
-  },
-  arctic: {
-    background: "#8fb4c9",
-    outside: 0x8fb4c9,
-    minimapBg: 0x1e3a4f,
-    minimapRock: 0xa9d6ee,
-    minimapFlora: 0x34d399,
-    minimapCrate: 0xf97316,
-  },
-  desert: {
-    background: "#7a4e1f",
-    outside: 0x7a4e1f,
-    minimapBg: 0x3b2a14,
-    minimapRock: 0xc98a4b,
-    minimapFlora: 0x4ade80,
-    minimapCrate: 0xfbbf24,
-  },
-};
-
-interface CratePalette {
-  body: number;
-  panel: number;
-  accent: number;
-  stripe: number;
-  edge: number;
-}
-
-const CRATE_PALETTE: Record<ArenaTheme, CratePalette> = {
-  cyber_outpost: {
-    body: 0x334155,
-    panel: 0x1e293b,
-    accent: 0x22d3ee,
-    stripe: 0xfacc15,
-    edge: 0x0b1220,
-  },
-  midnight: {
-    body: 0x3b2f55,
-    panel: 0x241a3a,
-    accent: 0x5eead4,
-    stripe: 0x8b5cf6,
-    edge: 0x0f0a1f,
-  },
-  arctic: {
-    body: 0xf97316,
-    panel: 0xc2410c,
-    accent: 0xffffff,
-    stripe: 0x1e293b,
-    edge: 0x431407,
-  },
-  desert: {
-    body: 0x8b5a2b,
-    panel: 0x6b4423,
-    accent: 0xfbbf24,
-    stripe: 0x1c1917,
-    edge: 0x1c1208,
-  },
-};
-
-/* ------------------------------------------------------------------ */
-/* Utilidades                                                          */
-/* ------------------------------------------------------------------ */
-
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function polygon(
-  cx: number,
-  cy: number,
-  r: number,
-  sides: number,
-  rotation = 0,
-  rand?: () => number,
-  jitter = 0
-): number[] {
-  const pts: number[] = [];
-  for (let i = 0; i < sides; i++) {
-    const ang = rotation + (i / sides) * Math.PI * 2;
-    const rr = rand ? r * (1 - jitter + rand() * jitter * 2) : r;
-    pts.push(cx + Math.cos(ang) * rr, cy + Math.sin(ang) * rr);
-  }
-  return pts;
-}
-
-/* ------------------------------------------------------------------ */
-/* Visuales                                                            */
-/* ------------------------------------------------------------------ */
-
-interface ObstacleVisual {
-  id: string;
+interface ObstacleNode {
   type: ObstacleState["type"];
-  theme: ArenaTheme;
-  baseGfx: Graphics;
-  hpGfx: Graphics;
-  canopyGfx?: Graphics;
-  canopyBaseAlpha: number;
-  x: number;
-  y: number;
-  radius: number;
-  lastHp: number;
+  base: Container;
+  hpBar?: Graphics;
+  bodyGfx?: Graphics;
+  canopy?: Container;
+  renderedAwake: boolean;
+  renderedCrackStage: number;
 }
 
-interface LootVisual {
+interface LootNode {
   root: Container;
-  gfx: Graphics;
-  label: Text;
   prompt: Container;
-  ring: Graphics;
-  baseX: number;
-  baseY: number;
   phase: number;
+  signature: string;
 }
 
 export const LOOT_PICKUP_RADIUS = 58;
 
+const lootLabelStyle = new TextStyle({
+  fontFamily: "system-ui, -apple-system, sans-serif",
+  fontSize: 10,
+  fontWeight: "900",
+  fill: "#f8fafc",
+  stroke: { color: "#020617", width: 3 },
+});
+
+const keycapStyle = new TextStyle({
+  fontFamily: "monospace",
+  fontSize: 11,
+  fontWeight: "900",
+  fill: "#0f172a",
+});
+
 export class ArenaRenderer {
   public readonly groundContainer = new Container();
+  public readonly hazardGroundContainer = new Container();
+  public readonly padContainer = new Container();
   public readonly lootContainer = new Container();
   public readonly obstacleContainer = new Container();
   public readonly canopyContainer = new Container();
+  public readonly smokeContainer = new Container();
+  public readonly stormContainer = new Container();
 
-  private floorGfx = new Graphics();
-  private obstacleVisuals = new Map<string, ObstacleVisual>();
-  private lootVisuals = new Map<string, LootVisual>();
+  private groundGfx = new Graphics();
+  private hazardGroundGfx = new Graphics();
+  private smokeGfx = new Graphics();
+  private stormGfx = new Graphics();
 
-  private renderedW = 0;
-  private renderedH = 0;
-  private renderedTheme: ArenaTheme | null = null;
-  private theme: ArenaTheme = "cyber_outpost";
-  private animTime = 0;
+  private obstacleNodes = new Map<string, ObstacleNode>();
+  private lootNodes = new Map<string, LootNode>();
+
+  private renderedWidth = 0;
+  private renderedHeight = 0;
+  private animClock = 0;
 
   constructor() {
-    this.groundContainer.addChild(this.floorGfx);
+    this.groundContainer.addChild(this.groundGfx);
+    this.hazardGroundContainer.addChild(this.hazardGroundGfx);
+    this.smokeContainer.addChild(this.smokeGfx);
+    this.stormContainer.addChild(this.stormGfx);
   }
 
-  public getTheme(): ArenaTheme {
-    return this.theme;
-  }
-
-  /* ----------------------------- Suelo ----------------------------- */
-
-  public renderMapBase(
-    mapWidth: number,
-    mapHeight: number,
-    theme: ArenaTheme
-  ): void {
-    if (
-      this.renderedW === mapWidth &&
-      this.renderedH === mapHeight &&
-      this.renderedTheme === theme
-    ) {
+  public renderMapBase(mapWidth: number, mapHeight: number): void {
+    if (this.renderedWidth === mapWidth && this.renderedHeight === mapHeight) {
       return;
     }
-    this.renderedW = mapWidth;
-    this.renderedH = mapHeight;
-    this.renderedTheme = theme;
-    this.theme = theme;
+    this.renderedWidth = mapWidth;
+    this.renderedHeight = mapHeight;
 
-    const g = this.floorGfx;
+    const g = this.groundGfx;
     g.clear();
 
-    const pad = 1200;
-    g.rect(-pad, -pad, mapWidth + pad * 2, mapHeight + pad * 2).fill({
-      color: THEME_STYLE[theme].outside,
+    // Exterior oscuro
+    g.rect(-700, -700, mapWidth + 1400, mapHeight + 1400).fill({
+      color: 0x0f1f17,
     });
 
-    switch (theme) {
-      case "midnight":
-        this.drawMidnightFloor(g, mapWidth, mapHeight);
-        break;
-      case "arctic":
-        this.drawArcticFloor(g, mapWidth, mapHeight);
-        break;
-      case "desert":
-        this.drawDesertFloor(g, mapWidth, mapHeight);
-        break;
-      default:
-        this.drawCyberFloor(g, mapWidth, mapHeight);
-        break;
-    }
-  }
+    // Césped vibrante estilo ZombsRoyale
+    g.rect(0, 0, mapWidth, mapHeight).fill({ color: 0x2f6f44 });
 
-  private drawCyberFloor(g: Graphics, w: number, h: number): void {
-    const rand = mulberry32(1337);
-    g.roundRect(0, 0, w, h, 10).fill({ color: 0x14212f });
-
-    // Malla hexagonal de placas metálicas
-    const s = 46;
-    const dx = s * 1.5;
-    const dy = Math.sqrt(3) * s;
-    const lit: Array<[number, number]> = [];
-
-    for (let col = -1; col * dx < w + s; col++) {
-      for (let row = -1; row * dy < h + s; row++) {
-        const cx = col * dx;
-        const cy = row * dy + (col % 2 === 0 ? 0 : dy / 2);
-        if (cx < -s || cy < -s || cx > w + s || cy > h + s) continue;
-        const pts = polygon(cx, cy, s - 1.5, 6, 0);
-        g.poly(pts).stroke({ width: 1.5, color: 0x203a52, alpha: 0.95 });
-        if (rand() < 0.09) lit.push([cx, cy]);
-      }
-    }
-
-    for (const [cx, cy] of lit) {
-      g.poly(polygon(cx, cy, s - 5, 6, 0)).fill({
-        color: 0x1d4466,
-        alpha: 0.55,
+    // Manchas orgánicas de pasto claro y tierra
+    const patches = 26;
+    for (let i = 0; i < patches; i++) {
+      const px = ((i * 197 + 91) % (mapWidth - 160)) + 80;
+      const py = ((i * 263 + 73) % (mapHeight - 160)) + 80;
+      const r = 42 + (i % 4) * 18;
+      g.circle(px, py, r).fill({
+        color: i % 3 === 0 ? 0x3b8252 : 0x285e3a,
+        alpha: 0.45,
       });
     }
 
-    // Plataformas de aparición en las esquinas
-    const pads: Array<[number, number]> = [
-      [180, 180],
-      [1420, 180],
-      [180, 1020],
-      [1420, 1020],
+    // Cuadrícula táctica sutil
+    const step = 100;
+    for (let x = step; x < mapWidth; x += step) {
+      g.moveTo(x, 0)
+        .lineTo(x, mapHeight)
+        .stroke({ width: 1, color: 0x1e462b, alpha: 0.32 });
+    }
+    for (let y = step; y < mapHeight; y += step) {
+      g.moveTo(0, y)
+        .lineTo(mapWidth, y)
+        .stroke({ width: 1, color: 0x1e462b, alpha: 0.32 });
+    }
+
+    // Plataforma central destacada para la Caja Dorada
+    g.circle(mapWidth / 2, mapHeight / 2, 74).fill({
+      color: 0x1e293b,
+      alpha: 0.45,
+    });
+    g.circle(mapWidth / 2, mapHeight / 2, 74).stroke({
+      width: 3,
+      color: 0xfacc15,
+      alpha: 0.55,
+    });
+
+    // Plataformas de aparición en las 4 esquinas
+    const margin = Math.min(170, Math.round(mapWidth * 0.16));
+    const spawns = [
+      { x: margin, y: margin },
+      { x: mapWidth - margin, y: margin },
+      { x: margin, y: mapHeight - margin },
+      { x: mapWidth - margin, y: mapHeight - margin },
     ];
-    for (const [px, py] of pads) {
-      g.circle(px, py, 74).fill({ color: 0x0b1626, alpha: 0.75 });
-      g.circle(px, py, 74).stroke({ width: 3, color: 0x22d3ee, alpha: 0.6 });
-      g.circle(px, py, 52).stroke({ width: 2, color: 0x22d3ee, alpha: 0.35 });
-      g.poly(polygon(px, py, 28, 6, Math.PI / 6)).stroke({
+    for (const sp of spawns) {
+      g.circle(sp.x, sp.y, 44).fill({ color: 0x1e3a2a, alpha: 0.55 });
+      g.circle(sp.x, sp.y, 44).stroke({
         width: 2,
-        color: 0x22d3ee,
-        alpha: 0.5,
+        color: 0x86efac,
+        alpha: 0.35,
       });
     }
 
-    // Bordes luminosos
-    g.roundRect(0, 0, w, h, 10).stroke({ width: 10, color: 0x0b1220 });
-    g.roundRect(0, 0, w, h, 10).stroke({
+    // Muro perimetral grueso
+    g.rect(0, 0, mapWidth, mapHeight).stroke({
+      width: 12,
+      color: 0x1e293b,
+    });
+    g.rect(-6, -6, mapWidth + 12, mapHeight + 12).stroke({
       width: 3,
-      color: 0x22d3ee,
-      alpha: 0.85,
+      color: 0x475569,
     });
   }
-
-  private drawMidnightFloor(g: Graphics, w: number, h: number): void {
-    const rand = mulberry32(777);
-    g.roundRect(0, 0, w, h, 12).fill({ color: 0x0c1626 });
-
-    for (let i = 0; i < 70; i++) {
-      g.ellipse(
-        rand() * w,
-        rand() * h,
-        40 + rand() * 90,
-        28 + rand() * 60
-      ).fill({ color: 0x10223c, alpha: 0.8 });
-    }
-    for (let i = 0; i < 6; i++) {
-      g.circle(rand() * w, rand() * h, 120 + rand() * 120).fill({
-        color: 0x2b5a8c,
-        alpha: 0.07,
-      });
-    }
-
-    // Hierba oscura
-    for (let i = 0; i < 650; i++) {
-      const x = rand() * w;
-      const y = rand() * h;
-      const c = rand() < 0.5 ? 0x1c3b45 : 0x16303a;
-      g.moveTo(x, y).lineTo(x - 3, y - 8).stroke({ width: 1.6, color: c, alpha: 0.8 });
-      g.moveTo(x, y).lineTo(x + 3, y - 9).stroke({ width: 1.6, color: c, alpha: 0.8 });
-    }
-
-    g.roundRect(0, 0, w, h, 12).stroke({ width: 10, color: 0x050a14 });
-    g.roundRect(0, 0, w, h, 12).stroke({
-      width: 3,
-      color: 0x38bdf8,
-      alpha: 0.35,
-    });
-  }
-
-  private drawArcticFloor(g: Graphics, w: number, h: number): void {
-    const rand = mulberry32(2024);
-    g.roundRect(0, 0, w, h, 12).fill({ color: 0xe6f2f9 });
-
-    // Placas de hielo
-    for (let i = 0; i < 34; i++) {
-      g.ellipse(
-        rand() * w,
-        rand() * h,
-        50 + rand() * 110,
-        30 + rand() * 70
-      ).fill({ color: 0xbfe3f2, alpha: 0.7 });
-    }
-
-    // Ventisqueros
-    for (let i = 0; i < 180; i++) {
-      const x = rand() * w;
-      const y = rand() * h;
-      const rx = 14 + rand() * 30;
-      g.ellipse(x + 3, y + 5, rx, rx * 0.45).fill({
-        color: 0xcfe3ee,
-        alpha: 0.8,
-      });
-      g.ellipse(x, y, rx, rx * 0.45).fill({ color: 0xffffff, alpha: 0.95 });
-    }
-
-    // Grietas
-    for (let i = 0; i < 26; i++) {
-      let x = rand() * w;
-      let y = rand() * h;
-      g.moveTo(x, y);
-      const segs = 4 + Math.floor(rand() * 4);
-      for (let k = 0; k < segs; k++) {
-        x += (rand() - 0.5) * 70;
-        y += (rand() - 0.5) * 70;
-        g.lineTo(x, y);
-      }
-      g.stroke({ width: 1.6, color: 0x8fbad1, alpha: 0.75 });
-    }
-
-    g.roundRect(0, 0, w, h, 12).stroke({ width: 10, color: 0x6b8da3 });
-    g.roundRect(0, 0, w, h, 12).stroke({ width: 3, color: 0xffffff, alpha: 0.9 });
-  }
-
-  private drawDesertFloor(g: Graphics, w: number, h: number): void {
-    const rand = mulberry32(4242);
-    g.roundRect(0, 0, w, h, 12).fill({ color: 0xddb06d });
-
-    for (let i = 0; i < 28; i++) {
-      g.ellipse(
-        rand() * w,
-        rand() * h,
-        60 + rand() * 130,
-        34 + rand() * 80
-      ).fill({ color: 0xcf9f5c, alpha: 0.55 });
-    }
-
-    // Ondulaciones de dunas
-    for (let i = 0; i < 46; i++) {
-      const x = rand() * w;
-      const y = rand() * h;
-      const len = 90 + rand() * 170;
-      g.moveTo(x, y)
-        .quadraticCurveTo(x + len / 2, y - 18 - rand() * 14, x + len, y)
-        .stroke({ width: 3, color: 0xc89a55, alpha: 0.65 });
-      g.moveTo(x + 8, y + 10)
-        .quadraticCurveTo(x + len / 2 + 8, y - 6, x + len - 10, y + 10)
-        .stroke({ width: 2, color: 0xf0cd8f, alpha: 0.55 });
-    }
-
-    // Guijarros
-    for (let i = 0; i < 220; i++) {
-      g.circle(rand() * w, rand() * h, 1.5 + rand() * 2.5).fill({
-        color: 0xb98a4a,
-        alpha: 0.85,
-      });
-    }
-
-    g.roundRect(0, 0, w, h, 12).stroke({ width: 10, color: 0x7a4e1f });
-    g.roundRect(0, 0, w, h, 12).stroke({ width: 3, color: 0xfbbf24, alpha: 0.55 });
-  }
-
-  /* ------------------------- Obstáculos ---------------------------- */
 
   public syncObstacles(
     obstacles: Record<string, ObstacleState>,
-    localPlayerX?: number,
-    localPlayerY?: number
+    players: Record<string, PlayerState>,
+    localSessionId: string,
+    dtSeconds: number
   ): void {
+    this.animClock += dtSeconds;
     const activeIds = new Set(Object.keys(obstacles));
+    const localPlayer = players[localSessionId];
 
-    for (const [id, vis] of Array.from(this.obstacleVisuals.entries())) {
-      const live = obstacles[id];
-      const stale =
-        !live ||
-        live.x !== vis.x ||
-        live.y !== vis.y ||
-        vis.theme !== this.theme;
-      if (stale) {
-        this.destroyObstacleVisual(vis);
-        this.obstacleVisuals.delete(id);
+    for (const [id, node] of this.obstacleNodes.entries()) {
+      if (!activeIds.has(id)) {
+        node.base.parent?.removeChild(node.base);
+        node.base.destroy({ children: true });
+        if (node.canopy) {
+          this.canopyContainer.removeChild(node.canopy);
+          node.canopy.destroy({ children: true });
+        }
+        this.obstacleNodes.delete(id);
       }
     }
 
     for (const [id, obs] of Object.entries(obstacles)) {
-      if (!activeIds.has(id)) continue;
-      let vis = this.obstacleVisuals.get(id);
-      if (!vis) {
-        vis = this.createObstacleVisual(obs);
-        this.obstacleVisuals.set(id, vis);
+      let node = this.obstacleNodes.get(id);
+      if (!node) {
+        node = this.createObstacleNode(obs);
+        this.obstacleNodes.set(id, node);
       }
 
-      if (obs.type === "crate" && vis.lastHp !== obs.hp) {
-        vis.lastHp = obs.hp;
-        this.drawCrateHp(vis.hpGfx, obs);
+      // Actualizar posición (importante para mimic_crate cuando persigue)
+      if (obs.type === "mimic_crate" && obs.awake) {
+        const jitterX = Math.sin(this.animClock * 38) * 2.5;
+        const jitterY = Math.cos(this.animClock * 34) * 2.5;
+        node.base.position.set(obs.x + jitterX, obs.y + jitterY);
+      } else {
+        node.base.position.set(obs.x, obs.y);
       }
+
+      // Animación de pulso en trampolines
+      if (obs.type === "jump_pad" && node.bodyGfx) {
+        const pulse = 1 + Math.sin(this.animClock * 6) * 0.06;
+        node.bodyGfx.scale.set(pulse);
+      }
+
+      // Redibujar cajas con grietas o mimics al despertar
+      const ratio = obs.maxHp > 0 ? obs.hp / obs.maxHp : 1;
+      const crackStage = ratio < 0.38 ? 2 : ratio < 0.72 ? 1 : 0;
+      const isAwake = Boolean(obs.awake);
 
       if (
-        vis.canopyGfx &&
-        localPlayerX !== undefined &&
-        localPlayerY !== undefined
+        (obs.type === "crate" ||
+          obs.type === "golden_crate" ||
+          obs.type === "mimic_crate") &&
+        (node.renderedCrackStage !== crackStage ||
+          node.renderedAwake !== isAwake)
       ) {
-        const dSq =
-          (localPlayerX - obs.x) * (localPlayerX - obs.x) +
-          (localPlayerY - obs.y) * (localPlayerY - obs.y);
-        vis.canopyGfx.alpha =
-          dSq < 78 * 78 ? vis.canopyBaseAlpha * 0.45 : vis.canopyBaseAlpha;
+        if (node.bodyGfx) {
+          this.drawCrateOrMimicVisual(
+            node.bodyGfx,
+            obs.type,
+            obs.radius,
+            crackStage,
+            isAwake
+          );
+        }
+        node.renderedCrackStage = crackStage;
+        node.renderedAwake = isAwake;
+      }
+
+      // Barra de vida para obstáculos destructibles dañados
+      if (node.hpBar) {
+        node.hpBar.clear();
+        if (obs.hp < obs.maxHp && obs.maxHp < 1000) {
+          const w = obs.radius * 1.6;
+          const pct = Math.max(0, Math.min(1, obs.hp / obs.maxHp));
+          node.hpBar
+            .roundRect(-w / 2, -obs.radius - 13, w, 6, 3)
+            .fill({ color: 0x020617, alpha: 0.85 });
+          node.hpBar
+            .roundRect(-w / 2 + 1, -obs.radius - 12, (w - 2) * pct, 4, 2)
+            .fill({
+              color:
+                obs.type === "golden_crate"
+                  ? 0xfacc15
+                  : obs.type === "explosive_barrel"
+                  ? 0xef4444
+                  : 0xf97316,
+            });
+        }
+      }
+
+      // Copa de árbol o arbusto en canopyContainer
+      if (node.canopy) {
+        if (obs.type === "tree") {
+          node.canopy.position.set(obs.x, obs.y);
+          const canopyR = obs.radius * 2.5;
+          const distLocal = localPlayer
+            ? Math.hypot(localPlayer.x - obs.x, localPlayer.y - obs.y)
+            : Infinity;
+          node.canopy.alpha = distLocal < canopyR + 14 ? 0.34 : 0.96;
+        } else if (obs.type === "bush") {
+          // Temblor del arbusto si alguien se mueve dentro
+          let someoneInside = false;
+          for (const p of Object.values(players)) {
+            if (!p.alive) continue;
+            if (Math.hypot(p.x - obs.x, p.y - obs.y) <= obs.radius) {
+              someoneInside = true;
+              break;
+            }
+          }
+          const shake = someoneInside
+            ? Math.sin(this.animClock * 28 + obs.x) * 3
+            : 0;
+          node.canopy.position.set(obs.x + shake, obs.y);
+
+          const distLocal = localPlayer
+            ? Math.hypot(localPlayer.x - obs.x, localPlayer.y - obs.y)
+            : Infinity;
+          node.canopy.alpha = distLocal <= obs.radius + 8 ? 0.42 : 0.95;
+        }
       }
     }
   }
 
-  private destroyObstacleVisual(vis: ObstacleVisual): void {
-    this.obstacleContainer.removeChild(vis.baseGfx, vis.hpGfx);
-    vis.baseGfx.destroy();
-    vis.hpGfx.destroy();
-    if (vis.canopyGfx) {
-      this.canopyContainer.removeChild(vis.canopyGfx);
-      vis.canopyGfx.destroy();
-    }
-  }
+  private createObstacleNode(obs: ObstacleState): ObstacleNode {
+    const base = new Container();
+    base.position.set(obs.x, obs.y);
+    const bodyGfx = new Graphics();
+    base.addChild(bodyGfx);
 
-  private createObstacleVisual(obs: ObstacleState): ObstacleVisual {
-    const theme = this.theme;
-    const baseGfx = new Graphics();
-    const hpGfx = new Graphics();
-    baseGfx.position.set(obs.x, obs.y);
-    hpGfx.position.set(obs.x, obs.y);
-
-    const rand = mulberry32(
-      Math.floor(obs.x * 31 + obs.y * 17 + obs.radius * 7)
-    );
-
-    let canopyGfx: Graphics | undefined;
-    let canopyBaseAlpha = 0.94;
-
-    // Sombra común
-    baseGfx
-      .ellipse(4, obs.radius * 0.5, obs.radius * 1.05, obs.radius * 0.8)
-      .fill({ color: 0x000000, alpha: theme === "arctic" ? 0.16 : 0.28 });
+    let hpBar: Graphics | undefined;
+    let canopy: Container | undefined;
 
     if (obs.type === "rock") {
-      this.drawMineral(baseGfx, obs, theme, rand);
-    } else if (obs.type === "crate") {
-      this.drawSupplyContainer(baseGfx, obs, theme);
-      this.drawCrateHp(hpGfx, obs);
+      bodyGfx
+        .circle(4, 5, obs.radius)
+        .fill({ color: 0x000000, alpha: 0.28 });
+      const pts: number[] = [];
+      const sides = 8;
+      for (let i = 0; i < sides; i++) {
+        const a = (i / sides) * Math.PI * 2;
+        const r = obs.radius * (i % 2 === 0 ? 1 : 0.86);
+        pts.push(Math.cos(a) * r, Math.sin(a) * r);
+      }
+      bodyGfx.poly(pts, true).fill({ color: 0x64748b });
+      bodyGfx.poly(pts, true).stroke({ width: 3.5, color: 0x1e293b });
+      bodyGfx
+        .circle(-obs.radius * 0.25, -obs.radius * 0.25, obs.radius * 0.38)
+        .fill({ color: 0x94a3b8, alpha: 0.65 });
+      this.obstacleContainer.addChild(base);
     } else if (obs.type === "tree") {
-      const flora = this.drawFlora(baseGfx, obs, theme, rand);
-      canopyGfx = flora.canopy;
-      canopyBaseAlpha = flora.alpha;
-      if (canopyGfx) {
-        canopyGfx.position.set(obs.x, obs.y);
-        canopyGfx.alpha = canopyBaseAlpha;
-        this.canopyContainer.addChild(canopyGfx);
-      }
-    }
+      bodyGfx
+        .circle(3, 4, obs.radius)
+        .fill({ color: 0x000000, alpha: 0.3 });
+      bodyGfx.circle(0, 0, obs.radius).fill({ color: 0x78350f });
+      bodyGfx
+        .circle(0, 0, obs.radius)
+        .stroke({ width: 3, color: 0x451a03 });
+      this.obstacleContainer.addChild(base);
 
-    this.obstacleContainer.addChild(baseGfx, hpGfx);
-
-    return {
-      id: obs.id,
-      type: obs.type,
-      theme,
-      baseGfx,
-      hpGfx,
-      canopyGfx,
-      canopyBaseAlpha,
-      x: obs.x,
-      y: obs.y,
-      radius: obs.radius,
-      lastHp: obs.hp,
-    };
-  }
-
-  private drawMineral(
-    g: Graphics,
-    obs: ObstacleState,
-    theme: ArenaTheme,
-    rand: () => number
-  ): void {
-    const r = obs.radius;
-
-    if (theme === "cyber_outpost") {
-      // Pilón hexagonal con núcleo energético
-      g.poly(polygon(0, 0, r, 6, Math.PI / 6)).fill({ color: 0x2b3f55 });
-      g.poly(polygon(0, 0, r * 0.72, 6, Math.PI / 6)).fill({ color: 0x38536f });
-      g.poly(polygon(0, 0, r * 0.45, 6, Math.PI / 6)).fill({ color: 0x1b2a3b });
-      g.circle(0, 0, r * 0.55).fill({ color: 0x22d3ee, alpha: 0.16 });
-      g.circle(0, 0, r * 0.22).fill({ color: 0x67e8f9 });
-      g.poly(polygon(0, 0, r, 6, Math.PI / 6)).stroke({
-        width: 4,
-        color: 0x0b1220,
-      });
-      for (let i = 0; i < 6; i++) {
-        const a = Math.PI / 6 + (i / 6) * Math.PI * 2;
-        g.moveTo(Math.cos(a) * r * 0.45, Math.sin(a) * r * 0.45)
-          .lineTo(Math.cos(a) * r * 0.9, Math.sin(a) * r * 0.9)
-          .stroke({ width: 1.5, color: 0x22d3ee, alpha: 0.5 });
-      }
-      return;
-    }
-
-    if (theme === "midnight") {
-      // Racimo de cristales violeta
-      g.circle(0, 0, r * 1.05).fill({ color: 0x8b5cf6, alpha: 0.12 });
-      const shards = 6;
-      for (let i = 0; i < shards; i++) {
-        const a = (i / shards) * Math.PI * 2 + rand() * 0.4;
-        const len = r * (0.75 + rand() * 0.35);
-        const wid = r * 0.34;
-        const tipX = Math.cos(a) * len;
-        const tipY = Math.sin(a) * len;
-        const nx = -Math.sin(a) * wid;
-        const ny = Math.cos(a) * wid;
-        g.poly([
-          nx * 0.6,
-          ny * 0.6,
-          tipX,
-          tipY,
-          -nx * 0.6,
-          -ny * 0.6,
-          0,
-          0,
-        ]).fill({ color: i % 2 === 0 ? 0x5b4b9e : 0x7c6bd0 });
-        g.poly([
-          nx * 0.6,
-          ny * 0.6,
-          tipX,
-          tipY,
-          -nx * 0.6,
-          -ny * 0.6,
-        ]).stroke({ width: 2.5, color: 0x1e1b4b });
-      }
-      g.circle(0, 0, r * 0.3).fill({ color: 0xc4b5fd, alpha: 0.9 });
-      return;
-    }
-
-    if (theme === "arctic") {
-      // Bloque de hielo facetado
-      const pts = polygon(0, 0, r, 7, rand() * 1, rand, 0.12);
-      g.poly(pts).fill({ color: 0xa9d6ee });
-      for (let i = 0; i < 7; i++) {
-        const j = (i + 1) % 7;
-        g.poly([0, 0, pts[i * 2], pts[i * 2 + 1], pts[j * 2], pts[j * 2 + 1]]).fill({
-          color: i % 3 === 0 ? 0xe0f4ff : i % 3 === 1 ? 0xbfe3f2 : 0x7fb2cf,
-          alpha: 0.85,
-        });
-      }
-      g.poly(pts).stroke({ width: 4, color: 0x3c6a85 });
-      g.circle(-r * 0.25, -r * 0.3, r * 0.14).fill({
-        color: 0xffffff,
+      canopy = new Container();
+      canopy.position.set(obs.x, obs.y);
+      const cg = new Graphics();
+      const cr = obs.radius * 2.45;
+      cg.circle(4, 6, cr).fill({ color: 0x000000, alpha: 0.22 });
+      cg.circle(0, 0, cr).fill({ color: 0x15803d });
+      cg.circle(-cr * 0.24, -cr * 0.2, cr * 0.65).fill({ color: 0x22c55e, alpha: 0.55 });
+      cg.circle(cr * 0.26, cr * 0.18, cr * 0.5).fill({ color: 0x166534, alpha: 0.65 });
+      cg.circle(0, 0, cr).stroke({ width: 3.5, color: 0x052e16 });
+      canopy.addChild(cg);
+      this.canopyContainer.addChild(canopy);
+    } else if (obs.type === "bush") {
+      canopy = new Container();
+      canopy.position.set(obs.x, obs.y);
+      const bg = new Graphics();
+      const r = obs.radius;
+      bg.circle(2, 4, r).fill({ color: 0x000000, alpha: 0.2 });
+      bg.circle(-r * 0.35, 0, r * 0.68).fill({ color: 0x16a34a });
+      bg.circle(r * 0.35, 2, r * 0.65).fill({ color: 0x15803d });
+      bg.circle(0, -r * 0.3, r * 0.7).fill({ color: 0x22c55e });
+      bg.circle(0, 0, r * 0.85).stroke({
+        width: 3,
+        color: 0x14532d,
         alpha: 0.8,
       });
-      return;
+      canopy.addChild(bg);
+      this.canopyContainer.addChild(canopy);
+    } else if (obs.type === "jump_pad") {
+      bodyGfx.circle(0, 0, obs.radius).fill({ color: 0x0f172a });
+      bodyGfx
+        .circle(0, 0, obs.radius)
+        .stroke({ width: 3.5, color: 0x22d3ee });
+      bodyGfx.circle(0, 0, obs.radius * 0.68).fill({ color: 0x0891b2 });
+      bodyGfx.circle(0, 0, obs.radius * 0.36).fill({ color: 0xa3e635 });
+      this.padContainer.addChild(base);
+    } else if (obs.type === "explosive_barrel") {
+      bodyGfx
+        .circle(3, 4, obs.radius)
+        .fill({ color: 0x000000, alpha: 0.32 });
+      bodyGfx.circle(0, 0, obs.radius).fill({ color: 0xdc2626 });
+      bodyGfx
+        .circle(0, 0, obs.radius)
+        .stroke({ width: 3.5, color: 0x450a0a });
+      bodyGfx
+        .circle(0, 0, obs.radius * 0.68)
+        .stroke({ width: 3, color: 0xfacc15 });
+      bodyGfx
+        .poly([0, -9, 9, 7, -9, 7], true)
+        .fill({ color: 0xfef08a });
+      hpBar = new Graphics();
+      base.addChild(hpBar);
+      this.obstacleContainer.addChild(base);
+    } else if (obs.type === "oil_barrel") {
+      bodyGfx
+        .circle(3, 4, obs.radius)
+        .fill({ color: 0x000000, alpha: 0.32 });
+      bodyGfx.circle(0, 0, obs.radius).fill({ color: 0x1e293b });
+      bodyGfx
+        .circle(0, 0, obs.radius)
+        .stroke({ width: 3.5, color: 0x020617 });
+      bodyGfx
+        .circle(0, 0, obs.radius * 0.62)
+        .stroke({ width: 2.5, color: 0xa855f7 });
+      bodyGfx.circle(0, 2, 6).fill({ color: 0x0f172a });
+      bodyGfx.poly([0, -7, 5, 2, -5, 2], true).fill({ color: 0xa855f7 });
+      hpBar = new Graphics();
+      base.addChild(hpBar);
+      this.obstacleContainer.addChild(base);
+    } else {
+      // crate, golden_crate, mimic_crate
+      this.drawCrateOrMimicVisual(
+        bodyGfx,
+        obs.type,
+        obs.radius,
+        0,
+        Boolean(obs.awake)
+      );
+      hpBar = new Graphics();
+      base.addChild(hpBar);
+      this.obstacleContainer.addChild(base);
     }
 
-    // desert: mesa de arenisca por capas
-    g.circle(0, 0, r).fill({ color: 0xb5733a });
-    g.ellipse(-2, -3, r * 0.85, r * 0.78).fill({ color: 0xc98a4b });
-    g.ellipse(-4, -6, r * 0.55, r * 0.5).fill({ color: 0xd9a05e });
-    for (let i = 1; i <= 3; i++) {
-      g.moveTo(-r * 0.8, -r * 0.35 + i * (r * 0.32))
-        .quadraticCurveTo(0, -r * 0.2 + i * (r * 0.32), r * 0.8, -r * 0.4 + i * (r * 0.32))
-        .stroke({ width: 1.8, color: 0x8b5a2b, alpha: 0.6 });
-    }
-    g.circle(0, 0, r).stroke({ width: 4, color: 0x5a3416 });
-  }
-
-  private drawFlora(
-    g: Graphics,
-    obs: ObstacleState,
-    theme: ArenaTheme,
-    rand: () => number
-  ): { canopy?: Graphics; alpha: number } {
-    const r = obs.radius;
-
-    if (theme === "cyber_outpost") {
-      // Torre de antena con cúpula holográfica
-      g.poly(polygon(0, 0, r, 6, 0)).fill({ color: 0x1e2f42 });
-      g.circle(0, 0, r * 0.55).fill({ color: 0x0f172a });
-      g.circle(0, 0, r * 0.22).fill({ color: 0x22d3ee });
-      g.poly(polygon(0, 0, r, 6, 0)).stroke({ width: 3.5, color: 0x0b1220 });
-
-      const canopy = new Graphics();
-      canopy.poly(polygon(0, 0, 50, 6, Math.PI / 6)).fill({
-        color: 0x22d3ee,
-        alpha: 0.16,
-      });
-      canopy.poly(polygon(0, 0, 50, 6, Math.PI / 6)).stroke({
-        width: 2.5,
-        color: 0x22d3ee,
-        alpha: 0.85,
-      });
-      canopy.poly(polygon(0, 0, 32, 6, Math.PI / 6)).stroke({
-        width: 1.8,
-        color: 0x67e8f9,
-        alpha: 0.6,
-      });
-      for (let i = 0; i < 6; i++) {
-        const a = Math.PI / 6 + (i / 6) * Math.PI * 2;
-        canopy
-          .moveTo(Math.cos(a) * 14, Math.sin(a) * 14)
-          .lineTo(Math.cos(a) * 50, Math.sin(a) * 50)
-          .stroke({ width: 1.4, color: 0x22d3ee, alpha: 0.5 });
-      }
-      return { canopy, alpha: 0.85 };
-    }
-
-    if (theme === "midnight") {
-      // Árbol retorcido con hongos luminosos
-      g.circle(0, 0, r).fill({ color: 0x2a1f3d });
-      g.circle(-2, -2, r * 0.58).fill({ color: 0x3b2d56 });
-      g.circle(0, 0, r).stroke({ width: 3.5, color: 0x0f0a1f });
-
-      const canopy = new Graphics();
-      for (let i = 0; i < 7; i++) {
-        const a = (i / 7) * Math.PI * 2;
-        canopy
-          .circle(Math.cos(a) * 24, Math.sin(a) * 24, 26)
-          .fill({ color: 0x123340 });
-      }
-      canopy.circle(0, 0, 40).fill({ color: 0x1a4a55 });
-      for (let i = 0; i < 6; i++) {
-        const a = (i / 6) * Math.PI * 2 + 0.3;
-        canopy.circle(Math.cos(a) * 20, Math.sin(a) * 20, 18).fill({
-          color: 0x1f5a63,
-        });
-      }
-      for (let i = 0; i < 8; i++) {
-        const a = rand() * Math.PI * 2;
-        const d = 8 + rand() * 38;
-        const x = Math.cos(a) * d;
-        const y = Math.sin(a) * d;
-        canopy.circle(x, y, 5.5).fill({ color: 0x5eead4, alpha: 0.2 });
-        canopy.circle(x, y, 2.4).fill({ color: 0x99f6e4, alpha: 0.95 });
-      }
-      return { canopy, alpha: 0.9 };
-    }
-
-    if (theme === "arctic") {
-      // Pino nevado
-      g.circle(0, 0, r).fill({ color: 0x6b4a2b });
-      g.circle(-2, -2, r * 0.5).fill({ color: 0x86603a });
-      g.circle(0, 0, r).stroke({ width: 3.5, color: 0x2a1b0e });
-
-      const canopy = new Graphics();
-      canopy.poly(polygon(0, 0, 52, 10, 0)).fill({ color: 0x2f6f5a });
-      canopy.poly(polygon(0, 0, 40, 10, Math.PI / 10)).fill({ color: 0x3b8a70 });
-      canopy.poly(polygon(0, 0, 28, 10, 0)).fill({ color: 0x4ba07f });
-      canopy.circle(0, 0, 22).fill({ color: 0xf1f8fc, alpha: 0.95 });
-      canopy.circle(-5, -5, 11).fill({ color: 0xffffff });
-      canopy.poly(polygon(0, 0, 52, 10, 0)).stroke({
-        width: 2.5,
-        color: 0x1d4a3b,
-        alpha: 0.9,
-      });
-      return { canopy, alpha: 0.93 };
-    }
-
-    // desert: cactus (sin copa; no oculta a los jugadores)
-    g.circle(0, 0, r).fill({ color: 0x4f9a52 });
-    for (let i = -2; i <= 2; i++) {
-      g.moveTo(i * 6, -r + 3).lineTo(i * 6, r - 3).stroke({
-        width: 1.8,
-        color: 0x3b7a3f,
-        alpha: 0.9,
-      });
-    }
-    g.circle(-r * 0.95, -4, 9).fill({ color: 0x4f9a52 });
-    g.circle(r * 0.9, 5, 9).fill({ color: 0x4f9a52 });
-    g.circle(-r * 0.95, -4, 9).stroke({ width: 2.5, color: 0x24502a });
-    g.circle(r * 0.9, 5, 9).stroke({ width: 2.5, color: 0x24502a });
-    g.circle(0, 0, r).stroke({ width: 3.5, color: 0x24502a });
-    g.circle(0, 0, 6).fill({ color: 0xf472b6 });
-    return { canopy: undefined, alpha: 1 };
-  }
-
-  private drawSupplyContainer(
-    g: Graphics,
-    obs: ObstacleState,
-    theme: ArenaTheme
-  ): void {
-    const r = obs.radius;
-    const p = CRATE_PALETTE[theme];
-
-    g.roundRect(-r, -r, r * 2, r * 2, 6).fill({ color: p.body });
-    g.roundRect(-r + 6, -r + 6, (r - 6) * 2, (r - 6) * 2, 4).fill({
-      color: p.panel,
-    });
-
-    // Franja de advertencia diagonal en la parte inferior
-    const bandTop = r - 14;
-    const bandBot = r - 5;
-    const step = 9;
-    for (let x = -r + 5; x < r - 12; x += step * 2) {
-      g.poly([
-        x,
-        bandBot,
-        x + step,
-        bandBot,
-        x + step + 5,
-        bandTop,
-        x + 5,
-        bandTop,
-      ]).fill({ color: p.stripe, alpha: 0.95 });
-    }
-
-    // Esquineros
-    const c = 9;
-    const o = r - 3;
-    const corner = (sx: number, sy: number) => {
-      g.moveTo(sx * o, sy * (o - c))
-        .lineTo(sx * o, sy * o)
-        .lineTo(sx * (o - c), sy * o)
-        .stroke({ width: 3, color: p.accent, alpha: 0.95 });
+    return {
+      type: obs.type,
+      base,
+      hpBar,
+      bodyGfx,
+      canopy,
+      renderedAwake: Boolean(obs.awake),
+      renderedCrackStage: 0,
     };
-    corner(-1, -1);
-    corner(1, -1);
-    corner(-1, 1);
-    corner(1, 1);
-
-    // Placa de cierre
-    g.roundRect(-7, -9, 14, 11, 3).fill({ color: p.accent });
-    g.circle(0, -4, 2).fill({ color: p.edge });
-
-    g.roundRect(-r, -r, r * 2, r * 2, 6).stroke({ width: 4, color: p.edge });
   }
 
-  private drawCrateHp(gfx: Graphics, obs: ObstacleState): void {
+  private drawCrateOrMimicVisual(
+    gfx: Graphics,
+    type: ObstacleState["type"],
+    radius: number,
+    crackStage: number,
+    awake: boolean
+  ): void {
     gfx.clear();
-    if (obs.hp >= obs.maxHp || obs.hp <= 0) return;
+    const s = radius * 1.72;
+    const half = s / 2;
 
-    const w = 44;
-    const h = 6;
-    const ratio = Math.max(0, Math.min(1, obs.hp / obs.maxHp));
     gfx
-      .roundRect(-w / 2, -obs.radius - 14, w, h, 3)
-      .fill({ color: 0x0f172a, alpha: 0.85 });
-    gfx
-      .roundRect(-w / 2 + 1, -obs.radius - 13, (w - 2) * ratio, h - 2, 2)
-      .fill({ color: 0xfbbf24, alpha: 1 });
+      .roundRect(-half + 3, -half + 4, s, s, 7)
+      .fill({ color: 0x000000, alpha: 0.32 });
+
+    if (type === "golden_crate") {
+      gfx.circle(0, 0, radius * 1.35).fill({ color: 0xfacc15, alpha: 0.22 });
+      gfx.roundRect(-half, -half, s, s, 8).fill({ color: 0xeab308 });
+      gfx
+        .roundRect(-half + 4, -half + 4, s - 8, s - 8, 5)
+        .fill({ color: 0xfacc15 });
+      gfx.roundRect(-half, -half, s, s, 8).stroke({
+        width: 3.5,
+        color: 0x713f12,
+      });
+      gfx
+        .moveTo(-half, 0)
+        .lineTo(half, 0)
+        .moveTo(0, -half)
+        .lineTo(0, half)
+        .stroke({ width: 4, color: 0xfef08a });
+      gfx.circle(0, 0, 8).fill({ color: 0xffffff });
+    } else if (type === "mimic_crate" && awake) {
+      // Caja trampa despierta mostrando ojos rojos y colmillos
+      gfx.roundRect(-half, -half, s, s, 7).fill({ color: 0x7c2d12 });
+      gfx.roundRect(-half, -half, s, s, 7).stroke({
+        width: 3.5,
+        color: 0xef4444,
+      });
+      // Boca oscura abierta
+      gfx.roundRect(-half + 5, -2, s - 10, half - 3, 4).fill({
+        color: 0x090d16,
+      });
+      // Dientes afilados blancos
+      for (let tx = -half + 8; tx <= half - 12; tx += 9) {
+        gfx
+          .poly([tx, -2, tx + 4, 6, tx + 8, -2], true)
+          .fill({ color: 0xf8fafc });
+      }
+      // Ojos brillantes furiosos
+      gfx.circle(-9, -10, 4.5).fill({ color: 0xef4444 });
+      gfx.circle(9, -10, 4.5).fill({ color: 0xef4444 });
+      gfx.circle(-9, -10, 2).fill({ color: 0xfef08a });
+      gfx.circle(9, -10, 2).fill({ color: 0xfef08a });
+    } else {
+      // Caja normal (o mimic dormido idéntico)
+      gfx.roundRect(-half, -half, s, s, 6).fill({ color: 0xb45309 });
+      gfx
+        .roundRect(-half + 4, -half + 4, s - 8, s - 8, 4)
+        .fill({ color: 0xd97706 });
+      gfx
+        .moveTo(-half + 5, -half + 5)
+        .lineTo(half - 5, half - 5)
+        .stroke({ width: 4, color: 0x92400e });
+      gfx.roundRect(-half, -half, s, s, 6).stroke({
+        width: 3,
+        color: 0x451a03,
+      });
+    }
+
+    // Grietas progresivas por daño
+    if (crackStage >= 1) {
+      gfx
+        .moveTo(-half * 0.6, -half * 0.4)
+        .lineTo(-2, 1)
+        .lineTo(half * 0.4, -half * 0.2)
+        .stroke({ width: 2.2, color: 0x1c1917 });
+    }
+    if (crackStage >= 2) {
+      gfx
+        .moveTo(half * 0.5, half * 0.55)
+        .lineTo(1, 2)
+        .lineTo(-half * 0.45, half * 0.4)
+        .stroke({ width: 2.5, color: 0x090d16 });
+    }
   }
 
-  /* ------------------------------ Botín ----------------------------- */
+  public syncHazards(
+    hazardZones: Record<string, HazardZoneState>,
+    localSessionId: string
+  ): void {
+    this.hazardGroundGfx.clear();
+    this.smokeGfx.clear();
 
-  /**
-   * Sincroniza el botín del suelo. Devuelve el botín más cercano dentro del
-   * radio de recogida (para mostrar el aviso "E").
-   */
+    for (const hz of Object.values(hazardZones)) {
+      if (hz.type === "oil") {
+        this.hazardGroundGfx
+          .circle(hz.x, hz.y, hz.radius)
+          .fill({ color: 0x0f172a, alpha: 0.78 });
+        this.hazardGroundGfx
+          .circle(hz.x - hz.radius * 0.22, hz.y - hz.radius * 0.18, hz.radius * 0.45)
+          .fill({ color: 0x581c87, alpha: 0.32 });
+        this.hazardGroundGfx
+          .circle(hz.x, hz.y, hz.radius)
+          .stroke({ width: 2, color: 0x334155, alpha: 0.7 });
+      } else if (hz.type === "fire") {
+        const flicker = 0.92 + Math.sin(this.animClock * 20 + hz.x) * 0.08;
+        this.hazardGroundGfx
+          .circle(hz.x, hz.y, hz.radius * flicker)
+          .fill({ color: 0xea580c, alpha: 0.62 });
+        this.hazardGroundGfx
+          .circle(hz.x, hz.y, hz.radius * 0.68 * flicker)
+          .fill({ color: 0xfacc15, alpha: 0.68 });
+        this.hazardGroundGfx
+          .circle(hz.x, hz.y, hz.radius)
+          .stroke({ width: 2.5, color: 0xef4444, alpha: 0.85 });
+      } else if (hz.type === "mine") {
+        const isMine = hz.ownerId === localSessionId;
+        const alpha = isMine || !hz.armed ? 0.92 : 0.36;
+        const blink = Math.sin(this.animClock * 10 + hz.x) > 0;
+        this.hazardGroundGfx
+          .circle(hz.x, hz.y, 13)
+          .fill({ color: 0x1e293b, alpha });
+        this.hazardGroundGfx
+          .circle(hz.x, hz.y, 13)
+          .stroke({ width: 2, color: isMine ? 0x38bdf8 : 0xef4444, alpha });
+        this.hazardGroundGfx
+          .circle(hz.x, hz.y, 4.5)
+          .fill({ color: blink ? 0xef4444 : 0x7f1d1d, alpha });
+      } else if (hz.type === "smoke") {
+        this.smokeGfx
+          .circle(hz.x, hz.y, hz.radius)
+          .fill({ color: 0x94a3b8, alpha: 0.55 });
+        this.smokeGfx
+          .circle(hz.x - hz.radius * 0.3, hz.y - hz.radius * 0.2, hz.radius * 0.68)
+          .fill({ color: 0xcbd5e1, alpha: 0.45 });
+        this.smokeGfx
+          .circle(hz.x + hz.radius * 0.28, hz.y + hz.radius * 0.22, hz.radius * 0.62)
+          .fill({ color: 0x64748b, alpha: 0.45 });
+      }
+    }
+  }
+
+  public renderStorm(
+    stormX: number,
+    stormY: number,
+    stormRadius: number
+  ): void {
+    this.stormGfx.clear();
+    const outerThickness = 2600;
+    this.stormGfx
+      .circle(stormX, stormY, stormRadius + outerThickness / 2)
+      .stroke({
+        width: outerThickness,
+        color: 0xdc2626,
+        alpha: 0.24,
+      });
+
+    const pulseAlpha = 0.65 + Math.sin(this.animClock * 5) * 0.2;
+    this.stormGfx.circle(stormX, stormY, stormRadius).stroke({
+      width: 5,
+      color: 0xf87171,
+      alpha: pulseAlpha,
+    });
+  }
+
   public syncLoot(
     lootItems: Record<string, LootItemState>,
     dtSeconds: number,
     playerX?: number,
     playerY?: number,
-    playerAlive = true
-  ): LootItemState | null {
-    this.animTime += dtSeconds;
+    playerAlive = false
+  ): void {
     const activeIds = new Set(Object.keys(lootItems));
 
-    for (const [id, vis] of Array.from(this.lootVisuals.entries())) {
+    for (const [id, node] of this.lootNodes.entries()) {
       if (!activeIds.has(id)) {
-        this.lootContainer.removeChild(vis.root);
-        vis.root.destroy({ children: true });
-        this.lootVisuals.delete(id);
+        this.lootContainer.removeChild(node.root);
+        node.root.destroy({ children: true });
+        this.lootNodes.delete(id);
       }
     }
 
-    let nearest: LootItemState | null = null;
-    let nearestDistSq = LOOT_PICKUP_RADIUS * LOOT_PICKUP_RADIUS;
+    let closestId: string | null = null;
+    let closestDistSq = LOOT_PICKUP_RADIUS * LOOT_PICKUP_RADIUS;
 
-    if (playerAlive && playerX !== undefined && playerY !== undefined) {
-      for (const item of Object.values(lootItems)) {
+    if (
+      playerAlive &&
+      typeof playerX === "number" &&
+      typeof playerY === "number"
+    ) {
+      for (const [id, item] of Object.entries(lootItems)) {
         const dSq = (playerX - item.x) ** 2 + (playerY - item.y) ** 2;
-        if (dSq <= nearestDistSq) {
-          nearestDistSq = dSq;
-          nearest = item;
+        if (dSq <= closestDistSq) {
+          closestDistSq = dSq;
+          closestId = id;
         }
       }
     }
 
     for (const [id, item] of Object.entries(lootItems)) {
-      let vis = this.lootVisuals.get(id);
-      if (!vis) {
-        vis = this.createLootVisual(item);
-        this.lootVisuals.set(id, vis);
-        this.lootContainer.addChild(vis.root);
+      const sig = `${item.kind}:${item.weaponType ?? ""}:${item.amount ?? 0}`;
+      let node = this.lootNodes.get(id);
+      if (node && node.signature !== sig) {
+        this.lootContainer.removeChild(node.root);
+        node.root.destroy({ children: true });
+        this.lootNodes.delete(id);
+        node = undefined;
       }
 
-      const bob = Math.sin(this.animTime * 3.6 + vis.phase) * 3;
-      vis.root.position.set(vis.baseX, vis.baseY + bob);
-      vis.gfx.rotation = Math.sin(this.animTime * 1.4 + vis.phase) * 0.06;
-
-      const isNearest = nearest !== null && nearest.id === id;
-      vis.prompt.visible = isNearest;
-      vis.ring.visible = isNearest;
-      if (isNearest) {
-        const pulse = 1 + Math.sin(this.animTime * 8) * 0.07;
-        vis.ring.scale.set(pulse);
-        vis.prompt.scale.set(pulse);
+      if (!node) {
+        node = this.createLootNode(item, sig);
+        this.lootNodes.set(id, node);
+        this.lootContainer.addChild(node.root);
       }
+
+      node.phase += dtSeconds * 3.8;
+      const bobY = Math.sin(node.phase) * 3.2;
+      node.root.position.set(item.x, item.y + bobY);
+      node.prompt.visible = id === closestId;
     }
-
-    return nearest;
   }
 
-  private createLootVisual(item: LootItemState): LootVisual {
+  private createLootNode(item: LootItemState, signature: string): LootNode {
     const root = new Container();
+    root.position.set(item.x, item.y);
     const gfx = new Graphics();
-    const ring = new Graphics();
-
-    let labelText = "BOTIQUÍN";
-    let accent = 0x4ade80;
 
     if (item.kind === "medkit") {
-      gfx.circle(0, 0, 25).fill({ color: 0x22c55e, alpha: 0.2 });
-      gfx.roundRect(-18, -11, 36, 22, 11).fill({ color: 0xf8fafc });
-      gfx.roundRect(-18, -11, 36, 22, 11).stroke({ width: 3, color: 0x14532d });
-      gfx.rect(-3, -7, 6, 14).fill({ color: 0x16a34a });
-      gfx.rect(-7, -3, 14, 6).fill({ color: 0x16a34a });
+      gfx.circle(0, 0, 20).fill({ color: 0x22c55e, alpha: 0.25 });
+      gfx.roundRect(-13, -11, 26, 22, 6).fill({ color: 0xf8fafc });
+      gfx
+        .roundRect(-13, -11, 26, 22, 6)
+        .stroke({ width: 2.5, color: 0x16a34a });
+      gfx.roundRect(-3, -7, 6, 14, 1.5).fill({ color: 0x16a34a });
+      gfx.roundRect(-7, -3, 14, 6, 1.5).fill({ color: 0x16a34a });
+      root.addChild(gfx);
+    } else if (item.kind === "shield") {
+      const isBig = (item.amount ?? 25) >= 50;
+      gfx.circle(0, 0, isBig ? 23 : 19).fill({ color: 0x38bdf8, alpha: 0.3 });
+      gfx.circle(0, 2, isBig ? 12 : 10).fill({ color: 0x0284c7 });
+      gfx
+        .circle(0, 2, isBig ? 12 : 10)
+        .stroke({ width: 2.5, color: 0xe0f2fe });
+      gfx.roundRect(-4, -12, 8, 5, 2).fill({ color: 0xbae6fd });
+      const label = new Text({
+        text: isBig ? "+50 ESCUDO" : "+25 ESCUDO",
+        style: lootLabelStyle,
+      });
+      label.anchor.set(0.5, 0);
+      label.position.set(0, 16);
+      root.addChild(gfx, label);
     } else {
       const wType: WeaponType = item.weaponType || "rifle";
-      const meta = WEAPON_META[wType];
-      accent = meta.badgeColor;
-      labelText = meta.label.toUpperCase();
+      const meta = WEAPON_META[wType] || WEAPON_META.rifle;
+      const color = hexToNumber(meta.badgeHex, 0x38bdf8);
 
-      gfx.poly(polygon(0, 0, 27, 6, 0)).fill({ color: accent, alpha: 0.2 });
-      gfx.poly(polygon(0, 0, 23, 6, 0)).fill({ color: 0x0f172a, alpha: 0.94 });
-      gfx.poly(polygon(0, 0, 23, 6, 0)).stroke({ width: 3, color: accent });
-      this.drawWeaponIcon(gfx, wType, accent);
+      if (meta.isSpecial) {
+        gfx.circle(0, 0, 25).fill({ color: 0xfacc15, alpha: 0.28 });
+        gfx
+          .circle(0, 0, 22)
+          .stroke({ width: 2, color: 0xfef08a, alpha: 0.8 });
+      } else {
+        gfx.circle(0, 0, 21).fill({ color, alpha: 0.25 });
+      }
+
+      gfx.roundRect(-16, -9, 32, 18, 6).fill({ color: 0x0f172a, alpha: 0.92 });
+      gfx.roundRect(-16, -9, 32, 18, 6).stroke({ width: 2.2, color });
+      gfx.roundRect(-10, -3, 20, 6, 2).fill({ color });
+
+      const label = new Text({ text: meta.label, style: lootLabelStyle });
+      label.anchor.set(0.5, 0);
+      label.position.set(0, 13);
+      root.addChild(gfx, label);
     }
 
-    ring.circle(0, 0, 33).stroke({ width: 2.5, color: 0xffffff, alpha: 0.9 });
-    ring.circle(0, 0, 38).stroke({ width: 1.5, color: accent, alpha: 0.7 });
-    ring.visible = false;
-
-    const label = new Text({
-      text: labelText,
-      style: {
-        fontFamily: "Inter, system-ui, sans-serif",
-        fontSize: 10,
-        fontWeight: "800",
-        fill: "#ffffff",
-        stroke: { color: "#0f172a", width: 3 },
-      },
-    });
-    label.anchor.set(0.5, 0);
-    label.position.set(0, 30);
-
-    // Aviso de tecla "E"
     const prompt = new Container();
     const keyBg = new Graphics();
-    keyBg.roundRect(-11, -11, 22, 22, 6).fill({ color: 0xf8fafc });
-    keyBg.roundRect(-11, -11, 22, 22, 6).stroke({ width: 2.5, color: 0x0f172a });
-    keyBg.roundRect(-11, 8, 22, 4, 2).fill({ color: 0xcbd5e1 });
-    const keyText = new Text({
-      text: "E",
-      style: {
-        fontFamily: "Inter, system-ui, sans-serif",
-        fontSize: 14,
-        fontWeight: "900",
-        fill: "#0f172a",
-      },
-    });
-    keyText.anchor.set(0.5);
-    keyText.position.set(0, -1);
-    prompt.addChild(keyBg, keyText);
-    prompt.position.set(0, -44);
+    keyBg.roundRect(-12, -37, 24, 20, 5).fill({ color: 0xfacc15 });
+    keyBg
+      .roundRect(-12, -37, 24, 20, 5)
+      .stroke({ width: 2, color: 0x0f172a });
+    const keyTxt = new Text({ text: "E", style: keycapStyle });
+    keyTxt.anchor.set(0.5);
+    keyTxt.position.set(0, -27);
+    prompt.addChild(keyBg, keyTxt);
     prompt.visible = false;
-
-    root.addChild(ring, gfx, label, prompt);
-    root.position.set(item.x, item.y);
+    root.addChild(prompt);
 
     return {
       root,
-      gfx,
-      label,
       prompt,
-      ring,
-      baseX: item.x,
-      baseY: item.y,
       phase: Math.random() * Math.PI * 2,
+      signature,
     };
   }
 
-  private drawWeaponIcon(g: Graphics, weapon: WeaponType, color: number): void {
-    switch (weapon) {
-      case "smg":
-        g.roundRect(-13, -3, 22, 6, 2).fill({ color });
-        g.rect(-3, 2, 5, 9).fill({ color });
-        g.rect(-8, 2, 4, 6).fill({ color, alpha: 0.8 });
-        break;
-      case "shotgun":
-        g.roundRect(-14, -4, 28, 4, 1.5).fill({ color });
-        g.roundRect(-14, 1, 28, 4, 1.5).fill({ color });
-        g.rect(-14, -5, 7, 11).fill({ color: 0xf8fafc, alpha: 0.85 });
-        break;
-      case "rifle":
-        g.roundRect(-15, -2.5, 30, 5, 2).fill({ color });
-        g.rect(-4, 2, 6, 8).fill({ color });
-        g.rect(4, -6, 8, 3).fill({ color: 0xf8fafc, alpha: 0.85 });
-        break;
-      case "burst":
-        g.roundRect(-14, -6, 28, 3.5, 1.5).fill({ color });
-        g.roundRect(-14, -1.8, 28, 3.5, 1.5).fill({ color });
-        g.roundRect(-14, 2.4, 28, 3.5, 1.5).fill({ color });
-        break;
-      case "plasma":
-        g.circle(-4, 0, 8).fill({ color });
-        g.circle(-4, 0, 4).fill({ color: 0xffffff });
-        g.roundRect(2, -3, 12, 6, 2).fill({ color });
-        break;
-      case "sniper":
-        g.roundRect(-16, -2, 32, 4, 1.5).fill({ color });
-        g.circle(0, -6, 4).stroke({ width: 2, color: 0xf8fafc });
-        g.rect(-8, 2, 5, 8).fill({ color });
-        break;
-      default:
-        g.roundRect(-8, -3, 16, 6, 2).fill({ color });
-        g.rect(-6, 2, 5, 8).fill({ color });
-        break;
-    }
-  }
-
   public reset(): void {
-    for (const vis of this.obstacleVisuals.values()) {
-      this.destroyObstacleVisual(vis);
+    for (const node of this.obstacleNodes.values()) {
+      node.base.destroy({ children: true });
+      node.canopy?.destroy({ children: true });
     }
-    this.obstacleVisuals.clear();
+    this.obstacleNodes.clear();
 
-    for (const vis of this.lootVisuals.values()) {
-      this.lootContainer.removeChild(vis.root);
-      vis.root.destroy({ children: true });
+    for (const node of this.lootNodes.values()) {
+      node.root.destroy({ children: true });
     }
-    this.lootVisuals.clear();
+    this.lootNodes.clear();
 
-    this.floorGfx.clear();
-    this.renderedW = 0;
-    this.renderedH = 0;
-    this.renderedTheme = null;
+    this.groundGfx.clear();
+    this.hazardGroundGfx.clear();
+    this.smokeGfx.clear();
+    this.stormGfx.clear();
+    this.renderedWidth = 0;
+    this.renderedHeight = 0;
   }
 }

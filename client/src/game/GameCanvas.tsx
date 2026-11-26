@@ -1,10 +1,14 @@
 import React, { useEffect, useRef } from "react";
 import { Application, Container, Graphics } from "pixi.js";
 import type {
-  ArenaTheme,
+  AbilityType,
   BulletHitEvent,
   BulletState,
   CrateDestroyedEvent,
+  EmoteEvent,
+  ExplosionEvent,
+  HazardZoneState,
+  KillFeedEvent,
   LootItemState,
   ObstacleState,
   PlayerEliminatedEvent,
@@ -13,8 +17,7 @@ import type {
 } from "@shared/types";
 import { colyseusClient } from "../network/ColyseusClient";
 import { soundManager } from "../audio/SoundManager";
-import { ArenaRenderer, THEME_STYLE } from "./ArenaRenderer";
-import { AmbientFx } from "./AmbientFx";
+import { ArenaRenderer } from "./ArenaRenderer";
 import { TankRenderer } from "./TankRenderer";
 import { BulletRenderer } from "./BulletRenderer";
 import { EffectsManager } from "./EffectsManager";
@@ -26,71 +29,91 @@ interface GameCanvasProps {
   mode: "online" | "local";
   mapWidth: number;
   mapHeight: number;
-  theme: ArenaTheme;
+  stormRadius: number;
+  stormX: number;
+  stormY: number;
   modifier: RoundModifier;
   obstacles: Record<string, ObstacleState>;
+  hazardZones: Record<string, HazardZoneState>;
   lootItems: Record<string, LootItemState>;
   players: Record<string, PlayerState>;
   bullets: Record<string, BulletState>;
   localSessionId: string;
+  localAbility?: AbilityType;
   isPlaying: boolean;
-  localTheme?: string;
+  inputManagerRef?: React.MutableRefObject<InputManager | null>;
   localArenaRef?: React.MutableRefObject<LocalArena | null>;
   onLocalStateSync?: (
     players: Record<string, PlayerState>,
     modifier: RoundModifier,
-    theme: ArenaTheme,
-    lootItems: Record<string, LootItemState>
+    lootItems: Record<string, LootItemState>,
+    mapWidth: number,
+    mapHeight: number,
+    stormRadius: number
   ) => void;
+  onKillFeed?: (ev: KillFeedEvent) => void;
 }
 
 export const GameCanvas: React.FC<GameCanvasProps> = ({
   mode,
   mapWidth,
   mapHeight,
-  theme,
+  stormRadius,
+  stormX,
+  stormY,
   modifier,
   obstacles,
+  hazardZones,
   lootItems,
   players,
   bullets,
   localSessionId,
+  localAbility = "dash",
   isPlaying,
-  localTheme = "random",
+  inputManagerRef,
   localArenaRef,
   onLocalStateSync,
+  onKillFeed,
 }) => {
   const hostRef = useRef<HTMLDivElement | null>(null);
 
   const stateRef = useRef({
     mapWidth,
     mapHeight,
-    theme,
+    stormRadius,
+    stormX,
+    stormY,
     modifier,
     obstacles,
+    hazardZones,
     lootItems,
     players,
     bullets,
     localSessionId,
+    localAbility,
     isPlaying,
-    localTheme,
   });
   stateRef.current = {
     mapWidth,
     mapHeight,
-    theme,
+    stormRadius,
+    stormX,
+    stormY,
     modifier,
     obstacles,
+    hazardZones,
     lootItems,
     players,
     bullets,
     localSessionId,
+    localAbility,
     isPlaying,
-    localTheme,
   };
 
   const onLocalSyncRef = useRef(onLocalStateSync);
   onLocalSyncRef.current = onLocalStateSync;
+  const onKillFeedRef = useRef(onKillFeed);
+  onKillFeedRef.current = onKillFeed;
 
   useEffect(() => {
     const containerEl = hostRef.current;
@@ -110,33 +133,43 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     const agentRenderer = new TankRenderer();
     const bulletRenderer = new BulletRenderer();
     const effectsManager = new EffectsManager();
-    const ambientFx = new AmbientFx();
 
     worldContainer.addChild(
       arenaRenderer.groundContainer,
+      arenaRenderer.hazardGroundContainer,
+      arenaRenderer.padContainer,
       arenaRenderer.lootContainer,
       arenaRenderer.obstacleContainer,
       agentRenderer.container,
       bulletRenderer.container,
-      effectsManager.container,
-      arenaRenderer.canopyContainer
+      arenaRenderer.canopyContainer,
+      arenaRenderer.smokeContainer,
+      arenaRenderer.stormContainer,
+      effectsManager.container
     );
 
     const prevBulletIds = new Set<string>();
     const prevLootIds = new Set<string>();
+    const prevHpMap = new Map<string, number>();
+    let prevAbilityCd = 0;
+
     let camX = mapWidth / 2;
     let camY = mapHeight / 2;
-    let appliedBackgroundTheme: ArenaTheme | null = null;
 
     const unsubHit = colyseusClient.onBulletHit((ev: BulletHitEvent) => {
-      effectsManager.spawnBulletHit(ev.x, ev.y, ev.targetType);
-      soundManager.playHit();
+      effectsManager.spawnBulletHit(ev.x, ev.y, ev.targetType, ev.damage);
+      soundManager.playHit(ev.targetType);
+    });
+
+    const unsubExplosion = colyseusClient.onExplosion((ev: ExplosionEvent) => {
+      effectsManager.spawnAreaExplosion(ev);
+      soundManager.playExplosion(ev.kind);
     });
 
     const unsubCrate = colyseusClient.onCrateDestroyed(
       (ev: CrateDestroyedEvent) => {
-        effectsManager.spawnCrateDebris(ev.x, ev.y);
-        soundManager.playCrateBreak();
+        effectsManager.spawnCrateDebris(ev.x, ev.y, Boolean(ev.isGolden));
+        soundManager.playCrateBreak(Boolean(ev.isGolden));
       }
     );
 
@@ -144,30 +177,35 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       (ev: PlayerEliminatedEvent) => {
         const victimColor =
           stateRef.current.players[ev.victimId]?.color || "#EF4444";
-        effectsManager.spawnExplosion(ev.x, ev.y, victimColor);
-        soundManager.playExplosion();
+        effectsManager.spawnPlayerExplosion(ev.x, ev.y, victimColor);
+        soundManager.playExplosion("barrel");
       }
     );
+
+    const unsubEmote = colyseusClient.onEmote((ev: EmoteEvent) => {
+      effectsManager.spawnEmote(ev.playerId, ev.x, ev.y, ev.emote);
+      soundManager.playEmote(ev.emote);
+    });
 
     const drawMinimap = (
       viewW: number,
       mW: number,
       mH: number,
-      activeTheme: ArenaTheme,
+      sX: number,
+      sY: number,
+      sR: number,
       activeObstacles: Record<string, ObstacleState>,
-      activeLoot: Record<string, LootItemState>,
       activePlayers: Record<string, PlayerState>,
       meId: string
     ) => {
-      const style = THEME_STYLE[activeTheme];
-      const miniW = 164;
+      const miniW = 156;
       const miniH = Math.round(miniW * (mH / mW));
-      minimapContainer.position.set(viewW - miniW - 16, 68);
+      minimapContainer.position.set(viewW - miniW - 16, 62);
 
       minimapGfx.clear();
       minimapGfx
         .roundRect(0, 0, miniW, miniH, 8)
-        .fill({ color: style.minimapBg, alpha: 0.82 });
+        .fill({ color: 0x0f1f17, alpha: 0.85 });
       minimapGfx
         .roundRect(0, 0, miniW, miniH, 8)
         .stroke({ width: 2, color: 0x475569, alpha: 0.95 });
@@ -176,39 +214,41 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       const sy = miniH / mH;
 
       for (const obs of Object.values(activeObstacles)) {
-        const color =
-          obs.type === "rock"
-            ? style.minimapRock
-            : obs.type === "crate"
-            ? style.minimapCrate
-            : style.minimapFlora;
+        const c =
+          obs.type === "golden_crate"
+            ? 0xfacc15
+            : obs.type === "explosive_barrel"
+            ? 0xef4444
+            : obs.type === "jump_pad"
+            ? 0x22d3ee
+            : obs.type === "rock"
+            ? 0x64748b
+            : 0x22c55e;
         minimapGfx
           .circle(obs.x * sx, obs.y * sy, Math.max(1.8, obs.radius * sx))
-          .fill({ color, alpha: 0.8 });
-      }
-
-      for (const item of Object.values(activeLoot)) {
-        minimapGfx
-          .circle(item.x * sx, item.y * sy, 2.4)
-          .fill({
-            color: item.kind === "medkit" ? 0x4ade80 : 0xffffff,
-            alpha: 0.95,
-          });
+          .fill({ color: c, alpha: 0.8 });
       }
 
       for (const p of Object.values(activePlayers)) {
         if (!p.alive) continue;
         const isMe = p.id === meId;
+        if (p.isInvisible && !isMe) continue;
         minimapGfx
           .circle(p.x * sx, p.y * sy, isMe ? 4.2 : 3.2)
           .fill({ color: isMe ? 0xfef08a : hexToNumber(p.color) });
       }
+
+      // Anillo de tormenta en el minimapa
+      const scaledR = Math.min(miniW * 1.4, sR * sx);
+      minimapGfx
+        .circle(sX * sx, sY * sy, scaledR)
+        .stroke({ width: 1.5, color: 0xf87171, alpha: 0.85 });
     };
 
     const initPixi = async () => {
       const pixiApp = new Application();
       await pixiApp.init({
-        background: THEME_STYLE[stateRef.current.theme]?.background ?? "#0a1220",
+        background: "#0f1f17",
         antialias: true,
         resolution: Math.min(window.devicePixelRatio || 1, 2),
         autoDensity: true,
@@ -228,48 +268,67 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       pixiApp.canvas.style.width = "100%";
       pixiApp.canvas.style.height = "100%";
 
-      pixiApp.stage.addChild(
-        worldContainer,
-        ambientFx.container,
-        minimapContainer
-      );
+      pixiApp.stage.addChild(worldContainer, minimapContainer);
       inputManager = new InputManager(pixiApp.canvas);
+      if (inputManagerRef) {
+        inputManagerRef.current = inputManager;
+      }
 
       if (mode === "local" && localArenaRef && !localArenaRef.current) {
         const localPlayer = Object.values(stateRef.current.players)[0];
         localArenaRef.current = new LocalArena(
-          localPlayer?.name || "Agente",
+          localPlayer?.name || "Jugador",
           localPlayer?.color || "#22D3EE",
+          stateRef.current.localAbility,
           {
-            onShoot: (x, y, angle, color, weapon) => {
+            onShoot: (pid, x, y, angle, color, weapon) => {
+              agentRenderer.triggerRecoil(pid, weapon === "sniper" ? 11 : 7);
               effectsManager.spawnMuzzleFlash(x, y, angle, color);
               soundManager.playShoot(weapon);
             },
-            onBulletHit: (ev) => {
-              effectsManager.spawnBulletHit(ev.x, ev.y, ev.targetType);
-              soundManager.playHit();
+            onBulletHit: (ev, victimId) => {
+              if (victimId) {
+                agentRenderer.triggerHitFlash(victimId);
+              }
+              effectsManager.spawnBulletHit(ev.x, ev.y, ev.targetType, ev.damage);
+              soundManager.playHit(ev.targetType);
+            },
+            onExplosion: (ev) => {
+              effectsManager.spawnAreaExplosion(ev);
+              soundManager.playExplosion(ev.kind);
             },
             onCrateDestroyed: (ev) => {
-              effectsManager.spawnCrateDebris(ev.x, ev.y);
-              soundManager.playCrateBreak();
+              effectsManager.spawnCrateDebris(ev.x, ev.y, Boolean(ev.isGolden));
+              soundManager.playCrateBreak(Boolean(ev.isGolden));
             },
             onPickup: () => {
               soundManager.playPickup();
             },
-            onEliminated: (ev) => {
+            onAbilityUsed: (ability) => {
+              soundManager.playAbility(ability);
+            },
+            onEmote: (ev) => {
+              effectsManager.spawnEmote(ev.playerId, ev.x, ev.y, ev.emote);
+              soundManager.playEmote(ev.emote);
+            },
+            onEliminated: (ev, kf) => {
               const victimColor =
                 localArenaRef.current?.players[ev.victimId]?.color || "#EF4444";
-              effectsManager.spawnExplosion(ev.x, ev.y, victimColor);
-              soundManager.playExplosion();
+              effectsManager.spawnPlayerExplosion(ev.x, ev.y, victimColor);
+              soundManager.playExplosion("barrel");
+              onKillFeedRef.current?.(kf);
             },
-          },
-          stateRef.current.localTheme
+          }
         );
+
+        const la = localArenaRef.current;
         onLocalSyncRef.current?.(
-          { ...localArenaRef.current.players },
-          localArenaRef.current.modifier,
-          localArenaRef.current.theme,
-          { ...localArenaRef.current.lootItems }
+          { ...la.players },
+          la.modifier,
+          { ...la.lootItems },
+          la.mapWidth,
+          la.mapHeight,
+          la.stormRadius
         );
       }
 
@@ -290,22 +349,27 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
         let activeMapW = stateRef.current.mapWidth || 1600;
         let activeMapH = stateRef.current.mapHeight || 1200;
-        let activeTheme = stateRef.current.theme;
+        let activeStormX = stateRef.current.stormX || activeMapW / 2;
+        let activeStormY = stateRef.current.stormY || activeMapH / 2;
+        let activeStormR = stateRef.current.stormRadius || 1100;
         let activeObstacles = stateRef.current.obstacles;
+        let activeHazards = stateRef.current.hazardZones;
         let activeLoot = stateRef.current.lootItems;
         let activePlayers = stateRef.current.players;
         let activeBullets = stateRef.current.bullets;
         let activeSessionId = stateRef.current.localSessionId;
         const playing = stateRef.current.isPlaying;
 
-        const worldScale = Math.max(0.75, Math.min(viewW / 1280, 1.15));
+        const worldScale = Math.max(0.75, Math.min(viewW / 1280, 1.12));
         let localAimAngle: number | undefined;
 
         if (mode === "local" && localArenaRef?.current) {
           const arena = localArenaRef.current;
           activeMapW = arena.mapWidth;
           activeMapH = arena.mapHeight;
-          activeTheme = arena.theme;
+          activeStormX = arena.stormX;
+          activeStormY = arena.stormY;
+          activeStormR = arena.stormRadius;
           activeSessionId = arena.localId;
 
           const meVisual =
@@ -316,10 +380,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           const offsetY = viewH / 2 - camY * worldScale;
 
           if (playing && inputManager) {
-            const meState = arena.players[activeSessionId];
-            const invLen = meState?.inventory.length ?? 1;
-            const prevSlot = meState?.activeSlot ?? 0;
-            inputManager.setInventoryContext(invLen, prevSlot);
             const input = inputManager.pollInput(
               meVisual.x,
               meVisual.y,
@@ -327,19 +387,12 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               offsetY,
               worldScale
             );
-            if (
-              input.weaponSlot !== undefined &&
-              input.weaponSlot >= 0 &&
-              input.weaponSlot < invLen &&
-              input.weaponSlot !== prevSlot
-            ) {
-              soundManager.playSwitchWeapon();
-            }
             localAimAngle = input.angle;
             arena.step(input, dtSeconds);
           }
 
           activeObstacles = arena.obstacles;
+          activeHazards = arena.hazardZones;
           activeLoot = arena.lootItems;
           activePlayers = arena.players;
           activeBullets = arena.bullets;
@@ -350,15 +403,16 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             onLocalSyncRef.current?.(
               { ...arena.players },
               arena.modifier,
-              arena.theme,
-              { ...arena.lootItems }
+              { ...arena.lootItems },
+              arena.mapWidth,
+              arena.mapHeight,
+              Math.round(arena.stormRadius)
             );
           }
         } else {
           const me = activePlayers[activeSessionId];
 
           if (playing && inputManager && me && me.alive) {
-            inputManager.setInventoryContext(me.inventory.length, me.activeSlot);
             const meVisual =
               agentRenderer.getVisualPosition(activeSessionId) || me;
             const offsetX = viewW / 2 - camX * worldScale;
@@ -370,24 +424,38 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               offsetY,
               worldScale
             );
-            if (
-              input.weaponSlot !== undefined &&
-              input.weaponSlot >= 0 &&
-              input.weaponSlot < me.inventory.length &&
-              input.weaponSlot !== me.activeSlot
-            ) {
-              soundManager.playSwitchWeapon();
-            }
             localAimAngle = input.angle;
             colyseusClient.sendInput(input);
           }
 
-          // Destello y sonido al detectar nuevos proyectiles en línea
+          // Sonido de habilidad al detectar inicio de cooldown local
+          if (me) {
+            if (me.abilityCooldownMs > prevAbilityCd + 500) {
+              soundManager.playAbility(me.ability);
+            }
+            prevAbilityCd = me.abilityCooldownMs;
+          }
+
+          // Hit flash al bajar HP/Shield de cualquier jugador en modo online
+          for (const [pid, p] of Object.entries(activePlayers)) {
+            const totalVital = p.hp + p.shield;
+            const prevVital = prevHpMap.get(pid);
+            if (prevVital !== undefined && totalVital < prevVital && p.alive) {
+              agentRenderer.triggerHitFlash(pid);
+            }
+            prevHpMap.set(pid, totalVital);
+          }
+
+          // Destello, retroceso y audio para nuevos proyectiles
           let playedShotThisFrame = false;
           for (const [bid, bullet] of Object.entries(activeBullets)) {
             if (!prevBulletIds.has(bid)) {
               const owner = activePlayers[bullet.ownerId];
               if (owner) {
+                agentRenderer.triggerRecoil(
+                  owner.id,
+                  bullet.weaponType === "sniper" ? 11 : 7
+                );
                 effectsManager.spawnMuzzleFlash(
                   bullet.x,
                   bullet.y,
@@ -406,7 +474,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             prevBulletIds.add(bid);
           }
 
-          // Sonido al recoger botín
           for (const oldLootId of prevLootIds) {
             if (!activeLoot[oldLootId]) {
               soundManager.playPickup();
@@ -419,14 +486,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           }
         }
 
-        // Fondo del renderizador según tema
-        if (appliedBackgroundTheme !== activeTheme) {
-          appliedBackgroundTheme = activeTheme;
-          pixiApp.renderer.background.color =
-            THEME_STYLE[activeTheme]?.outside ?? 0x0a1220;
-        }
-
-        // Cámara
+        // Seguimiento suave de cámara
         const me = activePlayers[activeSessionId];
         const meVisualPos =
           agentRenderer.getVisualPosition(activeSessionId) || me || {
@@ -449,45 +509,49 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         const baseOffsetX = viewW / 2 - camX * worldScale;
         const baseOffsetY = viewH / 2 - camY * worldScale;
 
-        arenaRenderer.renderMapBase(activeMapW, activeMapH, activeTheme);
+        arenaRenderer.renderMapBase(activeMapW, activeMapH);
+        arenaRenderer.syncHazards(activeHazards, activeSessionId);
         arenaRenderer.syncObstacles(
           activeObstacles,
-          meVisualPos.x,
-          meVisualPos.y
+          activePlayers,
+          activeSessionId,
+          dtSeconds
         );
         arenaRenderer.syncLoot(
           activeLoot,
           dtSeconds,
           me?.x,
           me?.y,
-          Boolean(me && me.alive)
+          Boolean(me && me.alive && !me.isDowned)
         );
+        arenaRenderer.renderStorm(activeStormX, activeStormY, activeStormR);
 
-        const lerpAlpha = Math.min(1, 0.33 * (ticker.deltaTime || 1));
+        const lerpAlpha = Math.min(1, 0.34 * (ticker.deltaTime || 1));
         agentRenderer.sync(
           activePlayers,
           activeSessionId,
           lerpAlpha,
+          dtSeconds,
           localAimAngle
         );
-        bulletRenderer.sync(activeBullets, dtSeconds);
-        effectsManager.update(dtSeconds, worldContainer, baseOffsetX, baseOffsetY);
 
-        // Ambiente y luz nocturna (posición en pantalla del jugador local)
-        ambientFx.setTheme(activeTheme, viewW, viewH);
-        ambientFx.update(
+        bulletRenderer.sync(activeBullets, dtSeconds, activePlayers);
+        effectsManager.update(
           dtSeconds,
-          baseOffsetX + meVisualPos.x * worldScale,
-          baseOffsetY + meVisualPos.y * worldScale
+          worldContainer,
+          baseOffsetX,
+          baseOffsetY,
+          (pid) => agentRenderer.getVisualPosition(pid)
         );
 
         drawMinimap(
           viewW,
           activeMapW,
           activeMapH,
-          activeTheme,
+          activeStormX,
+          activeStormY,
+          activeStormR,
           activeObstacles,
-          activeLoot,
           activePlayers,
           activeSessionId
         );
@@ -499,21 +563,25 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     return () => {
       destroyed = true;
       unsubHit();
+      unsubExplosion();
       unsubCrate();
       unsubEliminated();
+      unsubEmote();
       resizeObserver?.disconnect();
       inputManager?.destroy();
+      if (inputManagerRef) {
+        inputManagerRef.current = null;
+      }
       arenaRenderer.reset();
       agentRenderer.clear();
       bulletRenderer.clear();
       effectsManager.clear();
-      ambientFx.clear();
       minimapGfx.destroy();
       if (app) {
         app.destroy(true, { children: true });
       }
     };
-  }, [mode, localArenaRef]);
+  }, [mode, localArenaRef, inputManagerRef]);
 
   return (
     <div

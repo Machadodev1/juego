@@ -1,10 +1,15 @@
 import { Client, Delayed, Room } from "colyseus";
-import { ArraySchema } from "@colyseus/schema";
 import type {
-  ArenaTheme,
+  AbilityType,
   BulletHitEvent,
   CrateDestroyedEvent,
+  EmoteEvent,
+  EmoteType,
+  ExplosionEvent,
+  HazardZoneState,
+  KillFeedEvent,
   LootItemState,
+  ObstacleState,
   PlayerEliminatedEvent,
   PlayerInput,
   RoundEndEvent,
@@ -13,37 +18,44 @@ import type {
 import {
   BulletSchema,
   GameRoomState,
+  HazardZoneSchema,
   LootItemSchema,
   ObstacleSchema,
   PlayerSchema,
 } from "./schema/GameRoomState";
-import { ARENA_THEMES, ArenaGenerator } from "../game/ArenaGenerator";
+import { ArenaGenerator } from "../game/ArenaGenerator";
 import { PhysicsEngine } from "../game/PhysicsEngine";
 
 interface JoinOptions {
   name?: string;
   color?: string;
+  ability?: AbilityType;
   roomCode?: string;
-  theme?: string;
   create?: boolean;
 }
 
 interface ProfileUpdatePayload {
   name?: string;
   color?: string;
+  ability?: AbilityType;
 }
 
 interface ReadyPayload {
   ready?: boolean;
 }
 
-interface SelectThemePayload {
-  theme?: string;
+interface EmotePayload {
+  emote?: EmoteType;
 }
 
-interface SelectSlotPayload {
-  slot?: number;
-}
+const VALID_ABILITIES: AbilityType[] = [
+  "dash",
+  "energy_shield",
+  "proximity_mine",
+  "smoke_grenade",
+];
+
+const VALID_EMOTES: EmoteType[] = ["laugh", "skull", "gg", "chicken"];
 
 const DEFAULT_COLORS = [
   "#22D3EE",
@@ -55,8 +67,9 @@ const DEFAULT_COLORS = [
 ];
 
 const WINNING_SCORE = 5;
-const ROUND_END_DELAY_MS = 3500;
+const ROUND_END_DELAY_MS = 3600;
 const TICK_RATE_HZ = 60;
+const EMOTE_COOLDOWN_MS = 750;
 const ROOM_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 export class TankRoom extends Room<GameRoomState> {
@@ -66,9 +79,10 @@ export class TankRoom extends Room<GameRoomState> {
   private playerInputs: Map<string, PlayerInput> = new Map();
   private shootLatched: Map<string, boolean> = new Map();
   private interactLatched: Map<string, boolean> = new Map();
-  private slotLatched: Map<string, number | undefined> = new Map();
+  private abilityLatched: Map<string, boolean> = new Map();
+  private lastEmoteTime: Map<string, number> = new Map();
   private roundTransitionTimer: Delayed | null = null;
-  private roundEndingScheduled: boolean = false;
+  private roundEndingScheduled = false;
 
   private static activeRoomCodes: Set<string> = new Set();
 
@@ -83,22 +97,22 @@ export class TankRoom extends Room<GameRoomState> {
 
     this.state.roomCode = requestedCode;
     this.state.status = "waiting";
-    this.state.preferredTheme =
-      options?.theme &&
-      (options.theme === "random" ||
-        ARENA_THEMES.includes(options.theme as ArenaTheme))
-        ? options.theme
-        : "random";
-    this.state.theme = ArenaGenerator.pickTheme(this.state.preferredTheme);
     this.state.modifier = "normal";
     this.state.mapWidth = ArenaGenerator.MAP_WIDTH;
     this.state.mapHeight = ArenaGenerator.MAP_HEIGHT;
+    this.state.stormX = ArenaGenerator.MAP_WIDTH / 2;
+    this.state.stormY = ArenaGenerator.MAP_HEIGHT / 2;
+    this.state.stormRadius = Math.round(
+      Math.hypot(ArenaGenerator.MAP_WIDTH / 2, ArenaGenerator.MAP_HEIGHT / 2) +
+        80
+    );
 
     TankRoom.activeRoomCodes.add(requestedCode);
 
     options.roomCode = requestedCode;
     if (this.listing) {
-      (this.listing as unknown as Record<string, unknown>).roomCode = requestedCode;
+      (this.listing as unknown as Record<string, unknown>).roomCode =
+        requestedCode;
     }
     void this.setMetadata({ roomCode: requestedCode });
 
@@ -106,63 +120,73 @@ export class TankRoom extends Room<GameRoomState> {
       onBulletHit: (event: BulletHitEvent) => {
         this.broadcast("bulletHit", event);
       },
-      onObstacleDamaged: (obstacleId: string, hp: number) => {
-        const obs = this.state.obstacles.get(obstacleId);
-        if (obs) {
-          obs.hp = hp;
+      onExplosion: (event: ExplosionEvent) => {
+        this.broadcast("explosion", event);
+      },
+      onObstacleUpdated: (obs: ObstacleState) => {
+        const schema = this.state.obstacles.get(obs.id);
+        if (schema) {
+          schema.x = obs.x;
+          schema.y = obs.y;
+          schema.hp = obs.hp;
+          schema.awake = Boolean(obs.awake);
         }
       },
-      onCrateDestroyed: (event: CrateDestroyedEvent, spawnedLoot: LootItemState) => {
+      onObstacleRemoved: (obstacleId: string) => {
+        this.state.obstacles.delete(obstacleId);
+      },
+      onCrateDestroyed: (
+        event: CrateDestroyedEvent,
+        spawnedLoot: LootItemState[]
+      ) => {
         this.state.obstacles.delete(event.id);
-        this.addLootToState(spawnedLoot);
+        for (const item of spawnedLoot) {
+          this.addLootToState(item);
+        }
         this.broadcast("crateDestroyed", event);
+      },
+      onHazardSpawned: (zone: HazardZoneState) => {
+        this.upsertHazardInState(zone);
+      },
+      onHazardUpdated: (zone: HazardZoneState) => {
+        this.upsertHazardInState(zone);
+      },
+      onHazardRemoved: (zoneId: string) => {
+        this.state.hazardZones.delete(zoneId);
       },
       onLootSpawned: (loot: LootItemState) => {
         this.addLootToState(loot);
       },
-      onPlayerDamaged: (playerId: string, hp: number) => {
-        const player = this.state.players.get(playerId);
-        if (player) {
-          player.hp = hp;
-        }
-      },
-      onPlayerHealed: (playerId: string, hp: number) => {
-        const player = this.state.players.get(playerId);
-        if (player) {
-          player.hp = hp;
-        }
-      },
-      onPlayerInventoryUpdated: (
-        playerId: string,
-        inventory: WeaponType[],
-        activeSlot: number,
-        weapon: WeaponType
-      ) => {
-        const player = this.state.players.get(playerId);
-        if (player) {
-          player.inventory = new ArraySchema<string>(...inventory);
-          player.activeSlot = activeSlot;
-          player.weapon = weapon;
-        }
-      },
-      onPlayerEliminated: (event: PlayerEliminatedEvent) => {
-        const victim = this.state.players.get(event.victimId);
-        if (victim) {
-          victim.hp = 0;
-          victim.alive = false;
-        }
-        this.broadcast("playerEliminated", event);
-        this.checkRoundEndCondition();
+      onLootPickedUp: (lootId: string) => {
+        this.state.lootItems.delete(lootId);
       },
       onBulletRemoved: (bulletId: string) => {
         this.state.bullets.delete(bulletId);
       },
-      onLootPickedUp: (lootId: string) => {
-        this.state.lootItems.delete(lootId);
+      onPlayerEliminated: (
+        event: PlayerEliminatedEvent,
+        killFeed: KillFeedEvent,
+        victimHadBounty: boolean
+      ) => {
+        const victim = this.state.players.get(event.victimId);
+        if (victim) {
+          victim.hp = 0;
+          victim.shield = 0;
+          victim.alive = false;
+          victim.isDowned = false;
+          victim.downedTimerMs = 0;
+          if (victimHadBounty) {
+            victim.streak = 0;
+            victim.hasBounty = false;
+          }
+        }
+        this.broadcast("playerEliminated", event);
+        this.broadcast("killFeed", killFeed);
+        this.checkRoundEndCondition();
       },
     });
 
-    this.generateAndLoadArena(this.state.theme);
+    this.generateAndLoadArena("normal");
     this.registerMessageHandlers();
 
     this.setPatchRate(1000 / TICK_RATE_HZ);
@@ -183,22 +207,33 @@ export class TankRoom extends Room<GameRoomState> {
     player.id = client.sessionId;
     player.name = this.sanitizeName(options?.name, playerIndex + 1);
     player.color = this.sanitizeColor(options?.color, playerIndex);
+    player.ability = this.sanitizeAbility(options?.ability);
     player.x = spawn.x;
     player.y = spawn.y;
     player.angle = spawn.angle;
     player.hp = PhysicsEngine.PLAYER_MAX_HP;
     player.maxHp = PhysicsEngine.PLAYER_MAX_HP;
+    player.shield = 0;
+    player.maxShield = PhysicsEngine.PLAYER_MAX_SHIELD;
     player.alive = this.state.status === "waiting";
+    player.isDowned = false;
+    player.downedTimerMs = 0;
     player.score = 0;
+    player.streak = 0;
+    player.hasBounty = false;
     player.ready = false;
     player.weapon = "pistol";
-    player.inventory = new ArraySchema<string>("pistol");
-    player.activeSlot = 0;
+    player.abilityCooldownMs = 0;
+    player.shieldActive = false;
+    player.hasHotPotato = false;
+    player.hotPotatoTimerMs = 0;
+    player.isInvisible = false;
+    player.isAirborne = false;
 
     this.state.players.set(client.sessionId, player);
     this.shootLatched.set(client.sessionId, false);
     this.interactLatched.set(client.sessionId, false);
-    this.slotLatched.set(client.sessionId, undefined);
+    this.abilityLatched.set(client.sessionId, false);
     this.playerInputs.set(client.sessionId, {
       up: false,
       down: false,
@@ -207,6 +242,7 @@ export class TankRoom extends Room<GameRoomState> {
       angle: spawn.angle,
       shoot: false,
       interact: false,
+      useAbility: false,
       seq: 0,
     });
   }
@@ -216,7 +252,8 @@ export class TankRoom extends Room<GameRoomState> {
     this.playerInputs.delete(client.sessionId);
     this.shootLatched.delete(client.sessionId);
     this.interactLatched.delete(client.sessionId);
-    this.slotLatched.delete(client.sessionId);
+    this.abilityLatched.delete(client.sessionId);
+    this.lastEmoteTime.delete(client.sessionId);
     this.state.players.delete(client.sessionId);
 
     if (this.state.status === "playing") {
@@ -249,28 +286,14 @@ export class TankRoom extends Room<GameRoomState> {
       if (typeof payload.name === "string" && payload.name.trim().length > 0) {
         player.name = this.sanitizeName(payload.name, 1);
       }
-      if (typeof payload.color === "string" && payload.color.trim().length > 0) {
+      if (
+        typeof payload.color === "string" &&
+        payload.color.trim().length > 0
+      ) {
         player.color = this.sanitizeColor(payload.color, 0);
       }
-    });
-
-    this.onMessage("selectTheme", (_client, payload: SelectThemePayload) => {
-      if (this.state.status !== "waiting" || !payload?.theme) return;
-      if (
-        payload.theme === "random" ||
-        ARENA_THEMES.includes(payload.theme as ArenaTheme)
-      ) {
-        this.state.preferredTheme = payload.theme;
-        if (payload.theme !== "random") {
-          this.state.theme = payload.theme as ArenaTheme;
-        }
-      }
-    });
-
-    this.onMessage("selectSlot", (client, payload: SelectSlotPayload) => {
-      if (this.state.status !== "playing") return;
-      if (typeof payload?.slot === "number" && Number.isInteger(payload.slot)) {
-        this.physics.selectWeaponSlot(client.sessionId, payload.slot);
+      if (payload.ability) {
+        player.ability = this.sanitizeAbility(payload.ability);
       }
     });
 
@@ -298,6 +321,11 @@ export class TankRoom extends Room<GameRoomState> {
       this.startMatch();
     });
 
+    this.onMessage("emote", (client, payload: EmotePayload) => {
+      if (!payload?.emote) return;
+      this.tryEmitEmote(client.sessionId, payload.emote);
+    });
+
     const handleInput = (client: Client, input: PlayerInput) => {
       if (this.state.status !== "playing" || !input) return;
       const player = this.state.players.get(client.sessionId);
@@ -305,6 +333,7 @@ export class TankRoom extends Room<GameRoomState> {
 
       const shootPressed = Boolean(input.shoot);
       const interactPressed = Boolean(input.interact);
+      const abilityPressed = Boolean(input.useAbility);
 
       if (shootPressed) {
         this.shootLatched.set(client.sessionId, true);
@@ -312,11 +341,11 @@ export class TankRoom extends Room<GameRoomState> {
       if (interactPressed) {
         this.interactLatched.set(client.sessionId, true);
       }
-      if (
-        typeof input.weaponSlot === "number" &&
-        Number.isInteger(input.weaponSlot)
-      ) {
-        this.slotLatched.set(client.sessionId, input.weaponSlot);
+      if (abilityPressed) {
+        this.abilityLatched.set(client.sessionId, true);
+      }
+      if (input.emote) {
+        this.tryEmitEmote(client.sessionId, input.emote);
       }
 
       const prevInput = this.playerInputs.get(client.sessionId);
@@ -333,13 +362,32 @@ export class TankRoom extends Room<GameRoomState> {
         angle: nextAngle,
         shoot: shootPressed,
         interact: interactPressed,
-        weaponSlot: input.weaponSlot,
+        useAbility: abilityPressed,
         seq: typeof input.seq === "number" ? input.seq : 0,
       });
     };
 
     this.onMessage("input", handleInput);
     this.onMessage("playerInput", handleInput);
+  }
+
+  private tryEmitEmote(playerId: string, emote: EmoteType): void {
+    if (!VALID_EMOTES.includes(emote)) return;
+    const player = this.state.players.get(playerId);
+    if (!player) return;
+
+    const now = Date.now();
+    const last = this.lastEmoteTime.get(playerId) ?? 0;
+    if (now - last < EMOTE_COOLDOWN_MS) return;
+    this.lastEmoteTime.set(playerId, now);
+
+    const event: EmoteEvent = {
+      playerId,
+      x: player.x,
+      y: player.y,
+      emote,
+    };
+    this.broadcast("emote", event);
   }
 
   private checkAutoStart(): void {
@@ -361,6 +409,8 @@ export class TankRoom extends Room<GameRoomState> {
     void this.lock();
     for (const player of this.state.players.values()) {
       player.score = 0;
+      player.streak = 0;
+      player.hasBounty = false;
     }
     this.startNewRound();
   }
@@ -372,17 +422,11 @@ export class TankRoom extends Room<GameRoomState> {
     }
     this.roundEndingScheduled = false;
 
-    const nextModifier = ArenaGenerator.pickRandomModifier();
-    const nextTheme = ArenaGenerator.pickTheme(
-      this.state.preferredTheme,
-      this.state.theme
-    );
-
+    const nextModifier = ArenaGenerator.pickRandomModifier(this.state.modifier);
     this.state.modifier = nextModifier;
-    this.state.theme = nextTheme;
     this.physics.setModifier(nextModifier);
 
-    const arena = this.generateAndLoadArena(nextTheme);
+    const arena = this.generateAndLoadArena(nextModifier);
     const playerIds = Array.from(this.state.players.keys());
 
     const shuffledSpawns = [...arena.spawnPoints];
@@ -394,6 +438,13 @@ export class TankRoom extends Room<GameRoomState> {
       ];
     }
 
+    const startingWeapon: WeaponType =
+      nextModifier === "sniper_zero_g"
+        ? "sniper"
+        : nextModifier === "tiny_shotgun"
+        ? "shotgun"
+        : "pistol";
+
     playerIds.forEach((id, idx) => {
       const player = this.state.players.get(id);
       const spawn = shuffledSpawns[idx % shuffledSpawns.length];
@@ -404,14 +455,22 @@ export class TankRoom extends Room<GameRoomState> {
       player.angle = spawn.angle;
       player.hp = PhysicsEngine.PLAYER_MAX_HP;
       player.maxHp = PhysicsEngine.PLAYER_MAX_HP;
+      player.shield = 0;
+      player.maxShield = PhysicsEngine.PLAYER_MAX_SHIELD;
       player.alive = true;
-      player.weapon = "pistol";
-      player.inventory = new ArraySchema<string>("pistol");
-      player.activeSlot = 0;
+      player.isDowned = false;
+      player.downedTimerMs = 0;
+      player.weapon = startingWeapon;
+      player.abilityCooldownMs = 0;
+      player.shieldActive = false;
+      player.hasHotPotato = false;
+      player.hotPotatoTimerMs = 0;
+      player.isInvisible = nextModifier === "all_invisible";
+      player.isAirborne = false;
 
       this.shootLatched.set(id, false);
       this.interactLatched.set(id, false);
-      this.slotLatched.set(id, undefined);
+      this.abilityLatched.set(id, false);
       this.playerInputs.set(id, {
         up: false,
         down: false,
@@ -420,25 +479,48 @@ export class TankRoom extends Room<GameRoomState> {
         angle: spawn.angle,
         shoot: false,
         interact: false,
+        useAbility: false,
         seq: 0,
       });
 
-      this.physics.spawnPlayer(id, spawn.x, spawn.y, spawn.angle, "pistol");
+      this.physics.spawnPlayer(
+        id,
+        player.name,
+        spawn.x,
+        spawn.y,
+        spawn.angle,
+        startingWeapon,
+        player.ability,
+        player.hasBounty
+      );
     });
+
+    if (nextModifier === "hot_potato") {
+      const holderId = this.physics.assignHotPotato();
+      if (holderId) {
+        const holder = this.state.players.get(holderId);
+        if (holder) {
+          holder.hasHotPotato = true;
+          holder.hotPotatoTimerMs = 12000;
+        }
+      }
+    }
+
+    const storm = this.physics.getStormState();
+    this.state.stormX = storm.stormX;
+    this.state.stormY = storm.stormY;
+    this.state.stormRadius = storm.stormRadius;
 
     this.state.status = "playing";
   }
 
-  private generateAndLoadArena(theme: ArenaTheme) {
-    const arena = ArenaGenerator.generate(
-      ArenaGenerator.MAP_WIDTH,
-      ArenaGenerator.MAP_HEIGHT,
-      theme
-    );
+  private generateAndLoadArena(modifier = this.state.modifier) {
+    const arena = ArenaGenerator.generate(modifier);
 
     this.state.mapWidth = arena.mapWidth;
     this.state.mapHeight = arena.mapHeight;
     this.state.obstacles.clear();
+    this.state.hazardZones.clear();
     this.state.lootItems.clear();
     this.state.bullets.clear();
 
@@ -451,10 +533,16 @@ export class TankRoom extends Room<GameRoomState> {
       obsSchema.radius = obs.radius;
       obsSchema.hp = obs.hp;
       obsSchema.maxHp = obs.maxHp;
+      obsSchema.awake = Boolean(obs.awake);
       this.state.obstacles.set(obs.id, obsSchema);
     }
 
     this.physics.loadArena(arena.mapWidth, arena.mapHeight, arena.obstacles);
+    const storm = this.physics.getStormState();
+    this.state.stormX = storm.stormX;
+    this.state.stormY = storm.stormY;
+    this.state.stormRadius = storm.stormRadius;
+
     return arena;
   }
 
@@ -467,7 +555,24 @@ export class TankRoom extends Room<GameRoomState> {
     }
     schema.x = loot.x;
     schema.y = loot.y;
+    schema.amount = loot.amount ?? 35;
     this.state.lootItems.set(loot.id, schema);
+  }
+
+  private upsertHazardInState(zone: HazardZoneState): void {
+    let schema = this.state.hazardZones.get(zone.id);
+    if (!schema) {
+      schema = new HazardZoneSchema();
+      schema.id = zone.id;
+      this.state.hazardZones.set(zone.id, schema);
+    }
+    schema.type = zone.type;
+    schema.ownerId = zone.ownerId;
+    schema.x = zone.x;
+    schema.y = zone.y;
+    schema.radius = zone.radius;
+    schema.ttlMs = zone.ttlMs;
+    schema.armed = zone.armed;
   }
 
   private updateSimulation(deltaTime: number): void {
@@ -482,17 +587,16 @@ export class TankRoom extends Room<GameRoomState> {
 
       const latchedShoot = Boolean(this.shootLatched.get(playerId));
       const latchedInteract = Boolean(this.interactLatched.get(playerId));
-      const latchedSlot = this.slotLatched.get(playerId);
+      const latchedAbility = Boolean(this.abilityLatched.get(playerId));
       this.shootLatched.set(playerId, false);
       this.interactLatched.set(playerId, false);
-      this.slotLatched.set(playerId, undefined);
+      this.abilityLatched.set(playerId, false);
 
       const effectiveInput: PlayerInput = {
         ...input,
         shoot: input.shoot || latchedShoot,
         interact: input.interact || latchedInteract,
-        weaponSlot:
-          latchedSlot !== undefined ? latchedSlot : input.weaponSlot,
+        useAbility: input.useAbility || latchedAbility,
       };
 
       const spawnedBullets = this.physics.applyPlayerInput(
@@ -510,12 +614,32 @@ export class TankRoom extends Room<GameRoomState> {
         bulletSchema.vx = b.vx;
         bulletSchema.vy = b.vy;
         bulletSchema.weaponType = b.weaponType;
+        bulletSchema.scale = b.scale;
+        bulletSchema.isHoming = b.isHoming;
+        bulletSchema.isBoomerang = b.isBoomerang;
         this.state.bullets.set(b.id, bulletSchema);
       }
     }
 
-    this.physics.update(deltaTime);
+    this.physics.update(deltaTime, now);
 
+    // Sincronizar tormenta
+    const storm = this.physics.getStormState();
+    this.state.stormX = storm.stormX;
+    this.state.stormY = storm.stormY;
+    this.state.stormRadius = Math.round(storm.stormRadius);
+
+    // Sincronizar zonas de peligro activas
+    for (const hz of this.physics.getActiveHazardZones()) {
+      const schema = this.state.hazardZones.get(hz.id);
+      if (schema) {
+        schema.ttlMs = hz.ttlMs;
+        schema.armed = hz.armed;
+        schema.type = hz.type;
+      }
+    }
+
+    // Sincronizar instantánea de jugadores
     for (const [playerId, player] of this.state.players.entries()) {
       const snap = this.physics.getPlayerSnapshot(playerId);
       if (snap) {
@@ -524,12 +648,23 @@ export class TankRoom extends Room<GameRoomState> {
         player.angle = snap.angle;
         player.hp = snap.hp;
         player.maxHp = snap.maxHp;
+        player.shield = snap.shield;
+        player.maxShield = snap.maxShield;
         player.alive = snap.alive;
+        player.isDowned = snap.isDowned;
+        player.downedTimerMs = snap.downedTimerMs;
         player.weapon = snap.weapon;
-        player.activeSlot = snap.activeSlot;
+        player.ability = snap.ability;
+        player.abilityCooldownMs = snap.abilityCooldownMs;
+        player.shieldActive = snap.shieldActive;
+        player.hasHotPotato = snap.hasHotPotato;
+        player.hotPotatoTimerMs = snap.hotPotatoTimerMs;
+        player.isInvisible = snap.isInvisible;
+        player.isAirborne = snap.isAirborne;
       }
     }
 
+    // Sincronizar proyectiles activos
     const activeBullets = this.physics.getActiveBullets();
     for (const b of activeBullets) {
       let schema = this.state.bullets.get(b.id);
@@ -538,8 +673,12 @@ export class TankRoom extends Room<GameRoomState> {
         schema.id = b.id;
         schema.ownerId = b.ownerId;
         schema.weaponType = b.weaponType;
+        schema.scale = b.scale;
+        schema.isHoming = b.isHoming;
+        schema.isBoomerang = b.isBoomerang;
         this.state.bullets.set(b.id, schema);
       }
+      schema.ownerId = b.ownerId;
       schema.x = b.x;
       schema.y = b.y;
       schema.vx = b.vx;
@@ -554,16 +693,38 @@ export class TankRoom extends Room<GameRoomState> {
       return;
     }
 
-    const alivePlayers: PlayerSchema[] = [];
+    const standingPlayers: PlayerSchema[] = [];
+    const downedPlayers: PlayerSchema[] = [];
+
     for (const player of this.state.players.values()) {
-      if (player.alive) {
-        alivePlayers.push(player);
+      if (!player.alive) continue;
+      if (player.isDowned) {
+        downedPlayers.push(player);
+      } else {
+        standingPlayers.push(player);
       }
     }
 
-    if (alivePlayers.length <= 1) {
+    // Si nadie queda en pie ni gateando: empate
+    if (standingPlayers.length === 0 && downedPlayers.length === 0) {
       this.roundEndingScheduled = true;
-      this.finishRound(alivePlayers[0] ?? null);
+      this.finishRound(null);
+      return;
+    }
+
+    // Si queda 1 en pie y 0 gateando: gana el sobreviviente
+    if (standingPlayers.length === 1 && downedPlayers.length === 0) {
+      this.roundEndingScheduled = true;
+      this.finishRound(standingPlayers[0]);
+      return;
+    }
+
+    // Si solo queda 1 gateando y todos los demás ya murieron: sobrevive la ronda
+    if (standingPlayers.length === 0 && downedPlayers.length === 1) {
+      downedPlayers[0].isDowned = false;
+      downedPlayers[0].hp = 30;
+      this.roundEndingScheduled = true;
+      this.finishRound(downedPlayers[0]);
     }
   }
 
@@ -580,6 +741,14 @@ export class TankRoom extends Room<GameRoomState> {
     let championReached = false;
 
     for (const [id, player] of this.state.players.entries()) {
+      if (survivor && id === survivor.id) {
+        player.streak += 1;
+        player.hasBounty = player.streak >= 2;
+      } else {
+        player.streak = 0;
+        player.hasBounty = false;
+      }
+
       scores[id] = player.score;
       if (player.score >= WINNING_SCORE) {
         championReached = true;
@@ -596,6 +765,8 @@ export class TankRoom extends Room<GameRoomState> {
       if (championReached) {
         for (const player of this.state.players.values()) {
           player.score = 0;
+          player.streak = 0;
+          player.hasBounty = false;
         }
       }
 
@@ -616,7 +787,7 @@ export class TankRoom extends Room<GameRoomState> {
     this.roundEndingScheduled = false;
     this.state.status = "waiting";
     this.state.modifier = "normal";
-    this.generateAndLoadArena(this.state.theme);
+    this.generateAndLoadArena("normal");
 
     if (this.clients.length < this.maxClients) {
       void this.unlock();
@@ -632,16 +803,26 @@ export class TankRoom extends Room<GameRoomState> {
       idx++;
       player.ready = false;
       player.alive = true;
+      player.isDowned = false;
+      player.downedTimerMs = 0;
       player.hp = PhysicsEngine.PLAYER_MAX_HP;
       player.maxHp = PhysicsEngine.PLAYER_MAX_HP;
+      player.shield = 0;
+      player.maxShield = PhysicsEngine.PLAYER_MAX_SHIELD;
       player.weapon = "pistol";
-      player.inventory = new ArraySchema<string>("pistol");
-      player.activeSlot = 0;
+      player.abilityCooldownMs = 0;
+      player.shieldActive = false;
+      player.hasHotPotato = false;
+      player.hotPotatoTimerMs = 0;
+      player.isInvisible = false;
+      player.isAirborne = false;
       player.x = sp.x;
       player.y = sp.y;
       player.angle = sp.angle;
       if (resetScores) {
         player.score = 0;
+        player.streak = 0;
+        player.hasBounty = false;
       }
     }
   }
@@ -661,14 +842,17 @@ export class TankRoom extends Room<GameRoomState> {
     return Math.random().toString(36).substring(2, 6).toUpperCase();
   }
 
-  private sanitizeName(rawName: string | undefined, fallbackNumber: number): string {
+  private sanitizeName(
+    rawName: string | undefined,
+    fallbackNumber: number
+  ): string {
     if (typeof rawName === "string") {
       const cleaned = rawName.trim().slice(0, 16);
       if (cleaned.length > 0) {
         return cleaned;
       }
     }
-    return `Agente ${fallbackNumber}`;
+    return `Jugador ${fallbackNumber}`;
   }
 
   private sanitizeColor(rawColor: string | undefined, index: number): string {
@@ -679,5 +863,15 @@ export class TankRoom extends Room<GameRoomState> {
       return rawColor.trim();
     }
     return DEFAULT_COLORS[index % DEFAULT_COLORS.length];
+  }
+
+  private sanitizeAbility(rawAbility: string | undefined): AbilityType {
+    if (
+      typeof rawAbility === "string" &&
+      VALID_ABILITIES.includes(rawAbility as AbilityType)
+    ) {
+      return rawAbility as AbilityType;
+    }
+    return "dash";
   }
 }

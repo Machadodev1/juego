@@ -1,294 +1,341 @@
-import { Howler } from "howler";
-import type { WeaponType } from "@shared/types";
+import { Howl, Howler } from "howler";
+import type {
+  AbilityType,
+  EmoteType,
+  ExplosionEvent,
+  WeaponType,
+} from "@shared/types";
 
-class SoundManager {
-  private muted = false;
-  private fallbackCtx: AudioContext | null = null;
-  private noiseBuffer: AudioBuffer | null = null;
+const MUTE_STORAGE_KEY = "bala_perdida_muted";
+
+/**
+ * Genera un data URI WAV PCM de 16-bit mono en memoria para reproducir con Howler.js
+ * sin depender de archivos externos.
+ */
+function buildProceduralWavUri(
+  durationSec: number,
+  sampleFn: (t: number, progress: number) => number,
+  sampleRate = 22050
+): string {
+  const numSamples = Math.max(1, Math.floor(durationSec * sampleRate));
+  const dataSize = numSamples * 2;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  const writeStr = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // Mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, dataSize, true);
+
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / sampleRate;
+    const progress = i / numSamples;
+    const raw = Math.max(-1, Math.min(1, sampleFn(t, progress)));
+    view.setInt16(44 + i * 2, Math.round(raw * 32767), true);
+  }
+
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return `data:audio/wav;base64,${btoa(binary)}`;
+}
+
+class SoundService {
+  private muted: boolean;
+  private howls: Record<string, Howl> = {};
+  private initialized = false;
+  private lastFlameSoundMs = 0;
 
   constructor() {
-    const savedMute = localStorage.getItem("bala_perdida_muted");
-    if (savedMute === "true") {
-      this.muted = true;
-      Howler.mute(true);
-    }
+    this.muted = localStorage.getItem(MUTE_STORAGE_KEY) === "1";
+    Howler.mute(this.muted);
   }
 
-  private getAudioContext(): AudioContext | null {
-    if (this.muted) return null;
+  private ensureBank(): void {
+    if (this.initialized || typeof window === "undefined") return;
+    this.initialized = true;
 
-    const ctx = Howler.ctx || this.fallbackCtx;
-    if (ctx) {
-      if (ctx.state === "suspended") {
-        void ctx.resume().catch(() => {});
-      }
-      return ctx;
-    }
+    // 1. Disparos de armas
+    this.howls.pistol = new Howl({
+      src: [
+        buildProceduralWavUri(0.09, (t, p) => {
+          const env = Math.pow(1 - p, 2.2);
+          return Math.sin(2 * Math.PI * (520 - p * 360) * t) * env * 0.55;
+        }),
+      ],
+      volume: 0.42,
+    });
 
-    const AudioCtx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext })
-        .webkitAudioContext;
-    if (!AudioCtx) return null;
+    this.howls.shotgun = new Howl({
+      src: [
+        buildProceduralWavUri(0.18, (t, p) => {
+          const env = Math.pow(1 - p, 1.8);
+          const noise = Math.random() * 2 - 1;
+          const punch = Math.sin(2 * Math.PI * (190 - p * 140) * t);
+          return (noise * 0.55 + punch * 0.45) * env * 0.7;
+        }),
+      ],
+      volume: 0.5,
+    });
 
-    this.fallbackCtx = new AudioCtx();
-    return this.fallbackCtx;
-  }
+    this.howls.rifle = new Howl({
+      src: [
+        buildProceduralWavUri(0.075, (t, p) => {
+          const env = Math.pow(1 - p, 2.4);
+          const wave = Math.sign(Math.sin(2 * Math.PI * (620 - p * 420) * t));
+          return wave * env * 0.35;
+        }),
+      ],
+      volume: 0.38,
+    });
 
-  private getNoiseBuffer(ctx: AudioContext): AudioBuffer {
-    if (this.noiseBuffer && this.noiseBuffer.sampleRate === ctx.sampleRate) {
-      return this.noiseBuffer;
-    }
-    const bufferSize = Math.floor(ctx.sampleRate * 0.5);
-    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      data[i] = Math.random() * 2 - 1;
-    }
-    this.noiseBuffer = buffer;
-    return buffer;
+    this.howls.sniper = new Howl({
+      src: [
+        buildProceduralWavUri(0.24, (t, p) => {
+          const env = Math.pow(1 - p, 1.5);
+          const crack = (Math.random() * 2 - 1) * Math.pow(1 - p, 3.5);
+          const boom = Math.sin(2 * Math.PI * (280 - p * 220) * t);
+          return (crack * 0.6 + boom * 0.6) * env * 0.7;
+        }),
+      ],
+      volume: 0.55,
+    });
+
+    this.howls.impulse_gun = new Howl({
+      src: [
+        buildProceduralWavUri(0.16, (t, p) => {
+          const env = Math.pow(1 - p, 1.6);
+          return Math.sin(2 * Math.PI * (220 + p * 680) * t) * env * 0.6;
+        }),
+      ],
+      volume: 0.48,
+    });
+
+    this.howls.flamethrower = new Howl({
+      src: [
+        buildProceduralWavUri(0.11, (_t, p) => {
+          const env = Math.sin(p * Math.PI);
+          return (Math.random() * 2 - 1) * env * 0.35;
+        }),
+      ],
+      volume: 0.34,
+    });
+
+    this.howls.saw_disc = new Howl({
+      src: [
+        buildProceduralWavUri(0.15, (t, p) => {
+          const env = Math.pow(1 - p, 1.5);
+          return (
+            Math.sin(2 * Math.PI * 880 * t) *
+            Math.sin(2 * Math.PI * 55 * t) *
+            env *
+            0.55
+          );
+        }),
+      ],
+      volume: 0.45,
+    });
+
+    this.howls.bee_cannon = new Howl({
+      src: [
+        buildProceduralWavUri(0.14, (t, p) => {
+          const env = Math.sin(p * Math.PI);
+          const buzz = Math.sign(Math.sin(2 * Math.PI * (310 + Math.sin(t * 90) * 40) * t));
+          return buzz * env * 0.3;
+        }),
+      ],
+      volume: 0.4,
+    });
+
+    this.howls.grappling_hook = new Howl({
+      src: [
+        buildProceduralWavUri(0.15, (t, p) => {
+          const env = Math.pow(1 - p, 1.7);
+          return Math.sin(2 * Math.PI * (420 + p * 540) * t) * env * 0.5;
+        }),
+      ],
+      volume: 0.46,
+    });
+
+    // 2. Impactos, Escudo, Explosiones, Habilidades y Emotes
+    this.howls.hit = new Howl({
+      src: [
+        buildProceduralWavUri(0.06, (t, p) => {
+          return Math.sin(2 * Math.PI * (340 - p * 200) * t) * (1 - p) * 0.5;
+        }),
+      ],
+      volume: 0.42,
+    });
+
+    this.howls.shield_reflect = new Howl({
+      src: [
+        buildProceduralWavUri(0.13, (t, p) => {
+          return Math.sin(2 * Math.PI * (760 + p * 520) * t) * (1 - p) * 0.55;
+        }),
+      ],
+      volume: 0.5,
+    });
+
+    this.howls.crate = new Howl({
+      src: [
+        buildProceduralWavUri(0.15, (_t, p) => {
+          return (Math.random() * 2 - 1) * Math.pow(1 - p, 2) * 0.55;
+        }),
+      ],
+      volume: 0.45,
+    });
+
+    this.howls.explosion = new Howl({
+      src: [
+        buildProceduralWavUri(0.38, (t, p) => {
+          const env = Math.pow(1 - p, 1.5);
+          const noise = Math.random() * 2 - 1;
+          const sub = Math.sin(2 * Math.PI * (120 - p * 90) * t);
+          return (noise * 0.55 + sub * 0.55) * env * 0.8;
+        }),
+      ],
+      volume: 0.6,
+    });
+
+    this.howls.pickup = new Howl({
+      src: [
+        buildProceduralWavUri(0.14, (t, p) => {
+          const freq = p < 0.5 ? 587 : 880;
+          return Math.sin(2 * Math.PI * freq * t) * (1 - p * 0.6) * 0.45;
+        }),
+      ],
+      volume: 0.45,
+    });
+
+    this.howls.ability = new Howl({
+      src: [
+        buildProceduralWavUri(0.16, (t, p) => {
+          return Math.sin(2 * Math.PI * (320 + p * 480) * t) * (1 - p) * 0.48;
+        }),
+      ],
+      volume: 0.46,
+    });
+
+    this.howls.emote = new Howl({
+      src: [
+        buildProceduralWavUri(0.18, (t, p) => {
+          const freq = p < 0.35 ? 523 : p < 0.7 ? 659 : 784;
+          return Math.sin(2 * Math.PI * freq * t) * (1 - p * 0.5) * 0.42;
+        }),
+      ],
+      volume: 0.45,
+    });
+
+    this.howls.round_win = new Howl({
+      src: [
+        buildProceduralWavUri(0.42, (t, p) => {
+          const freq = p < 0.33 ? 523 : p < 0.66 ? 659 : 1046;
+          return Math.sin(2 * Math.PI * freq * t) * (1 - p * 0.4) * 0.48;
+        }),
+      ],
+      volume: 0.5,
+    });
   }
 
   public isMuted(): boolean {
     return this.muted;
   }
 
-  public setMuted(muted: boolean): void {
-    this.muted = muted;
-    Howler.mute(muted);
-    localStorage.setItem("bala_perdida_muted", String(muted));
-  }
-
   public toggleMute(): boolean {
-    this.setMuted(!this.muted);
+    this.muted = !this.muted;
+    Howler.mute(this.muted);
+    localStorage.setItem(MUTE_STORAGE_KEY, this.muted ? "1" : "0");
     return this.muted;
   }
 
+  private playKey(key: string, rate = 1): void {
+    if (this.muted) return;
+    this.ensureBank();
+    const howl = this.howls[key];
+    if (!howl) return;
+    const id = howl.play();
+    if (rate !== 1) {
+      howl.rate(rate, id);
+    }
+  }
+
   public playShoot(weapon: WeaponType = "pistol"): void {
-    const ctx = this.getAudioContext();
-    if (!ctx) return;
-
-    const now = ctx.currentTime;
-
-    if (weapon === "shotgun") {
-      const noise = ctx.createBufferSource();
-      noise.buffer = this.getNoiseBuffer(ctx);
-      const filter = ctx.createBiquadFilter();
-      filter.type = "lowpass";
-      filter.frequency.setValueAtTime(950, now);
-      filter.frequency.exponentialRampToValueAtTime(140, now + 0.18);
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0.24, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.19);
-      noise.connect(filter);
-      filter.connect(gain);
-      gain.connect(ctx.destination);
-      noise.start(now);
-      noise.stop(now + 0.19);
-      return;
+    if (weapon === "flamethrower") {
+      const now = performance.now();
+      if (now - this.lastFlameSoundMs < 95) return;
+      this.lastFlameSoundMs = now;
     }
-
-    if (weapon === "sniper") {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sawtooth";
-      osc.frequency.setValueAtTime(980, now);
-      osc.frequency.exponentialRampToValueAtTime(75, now + 0.22);
-      gain.gain.setValueAtTime(0.22, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.23);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + 0.23);
-      return;
-    }
-
-    if (weapon === "plasma") {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(320, now);
-      osc.frequency.exponentialRampToValueAtTime(880, now + 0.06);
-      osc.frequency.exponentialRampToValueAtTime(160, now + 0.18);
-      gain.gain.setValueAtTime(0.2, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.19);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + 0.19);
-      return;
-    }
-
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = weapon === "smg" ? "square" : "sawtooth";
-    const startFreq =
-      weapon === "smg" ? 660 : weapon === "burst" ? 600 : weapon === "rifle" ? 480 : 520;
-    const dur = weapon === "smg" ? 0.065 : 0.095;
-
-    osc.frequency.setValueAtTime(startFreq, now);
-    osc.frequency.exponentialRampToValueAtTime(120, now + dur);
-
-    gain.gain.setValueAtTime(weapon === "smg" ? 0.1 : 0.14, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + dur + 0.01);
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-
-    osc.start(now);
-    osc.stop(now + dur + 0.01);
+    this.playKey(weapon, 0.96 + Math.random() * 0.08);
   }
 
-  public playSwitchWeapon(): void {
-    const ctx = this.getAudioContext();
-    if (!ctx) return;
-    const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = "triangle";
-    osc.frequency.setValueAtTime(420, now);
-    osc.frequency.setValueAtTime(620, now + 0.035);
-    gain.gain.setValueAtTime(0.09, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.08);
+  public playHit(targetType?: string): void {
+    if (targetType === "shield") {
+      this.playKey("shield_reflect", 1);
+      return;
+    }
+    this.playKey("hit", 0.95 + Math.random() * 0.12);
   }
 
-  public playHit(): void {
-    const ctx = this.getAudioContext();
-    if (!ctx) return;
-
-    const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-
-    osc.type = "triangle";
-    osc.frequency.setValueAtTime(880, now);
-    osc.frequency.exponentialRampToValueAtTime(360, now + 0.06);
-
-    gain.gain.setValueAtTime(0.12, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-
-    osc.start(now);
-    osc.stop(now + 0.07);
+  public playCrateBreak(isGolden = false): void {
+    this.playKey("crate", isGolden ? 1.25 : 1);
+    if (isGolden) {
+      this.playKey("pickup", 1.15);
+    }
   }
 
-  public playCrateBreak(): void {
-    const ctx = this.getAudioContext();
-    if (!ctx) return;
-
-    const now = ctx.currentTime;
-    const noise = ctx.createBufferSource();
-    noise.buffer = this.getNoiseBuffer(ctx);
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = "bandpass";
-    filter.frequency.setValueAtTime(650, now);
-
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0.24, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
-
-    noise.connect(filter);
-    filter.connect(gain);
-    gain.connect(ctx.destination);
-
-    noise.start(now);
-    noise.stop(now + 0.22);
+  public playExplosion(kind: ExplosionEvent["kind"] = "barrel"): void {
+    const rate = kind === "jump_land" ? 1.35 : kind === "potato" ? 0.85 : 1;
+    this.playKey("explosion", rate);
   }
 
   public playPickup(): void {
-    const ctx = this.getAudioContext();
-    if (!ctx) return;
-
-    const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-
-    osc.type = "sine";
-    osc.frequency.setValueAtTime(587.33, now);
-    osc.frequency.setValueAtTime(880, now + 0.06);
-
-    gain.gain.setValueAtTime(0.13, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-
-    osc.start(now);
-    osc.stop(now + 0.16);
+    this.playKey("pickup", 1);
   }
 
-  public playExplosion(): void {
-    const ctx = this.getAudioContext();
-    if (!ctx) return;
+  public playAbility(ability: AbilityType): void {
+    const rate =
+      ability === "dash"
+        ? 1.25
+        : ability === "energy_shield"
+        ? 0.95
+        : ability === "proximity_mine"
+        ? 1.1
+        : 0.82;
+    this.playKey("ability", rate);
+  }
 
-    const now = ctx.currentTime;
-
-    const noise = ctx.createBufferSource();
-    noise.buffer = this.getNoiseBuffer(ctx);
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = "lowpass";
-    filter.frequency.setValueAtTime(1400, now);
-    filter.frequency.exponentialRampToValueAtTime(120, now + 0.42);
-
-    const noiseGain = ctx.createGain();
-    noiseGain.gain.setValueAtTime(0.3, now);
-    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
-
-    noise.connect(filter);
-    filter.connect(noiseGain);
-    noiseGain.connect(ctx.destination);
-    noise.start(now);
-    noise.stop(now + 0.45);
-
-    const sub = ctx.createOscillator();
-    const subGain = ctx.createGain();
-    sub.type = "sine";
-    sub.frequency.setValueAtTime(140, now);
-    sub.frequency.exponentialRampToValueAtTime(32, now + 0.35);
-
-    subGain.gain.setValueAtTime(0.32, now);
-    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
-
-    sub.connect(subGain);
-    subGain.connect(ctx.destination);
-    sub.start(now);
-    sub.stop(now + 0.36);
+  public playEmote(emote: EmoteType): void {
+    const rate =
+      emote === "laugh"
+        ? 1.18
+        : emote === "skull"
+        ? 0.78
+        : emote === "gg"
+        ? 1.05
+        : 1.32;
+    this.playKey("emote", rate);
   }
 
   public playRoundWin(): void {
-    const ctx = this.getAudioContext();
-    if (!ctx) return;
-
-    const now = ctx.currentTime;
-    const notes = [523.25, 659.25, 783.99, 1046.5];
-
-    notes.forEach((freq, idx) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      const start = now + idx * 0.075;
-
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(freq, start);
-
-      gain.gain.setValueAtTime(0.001, start);
-      gain.gain.linearRampToValueAtTime(0.14, start + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.001, start + 0.25);
-
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-
-      osc.start(start);
-      osc.stop(start + 0.26);
-    });
+    this.playKey("round_win", 1);
   }
 }
 
-export const soundManager = new SoundManager();
+export const soundManager = new SoundService();

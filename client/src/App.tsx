@@ -1,16 +1,19 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type {
-  ArenaTheme,
+  AbilityType,
+  EmoteType,
+  KillFeedEvent,
   LootItemState,
   PlayerState,
   RoundEndEvent,
   RoundModifier,
 } from "@shared/types";
 import {
+  ABILITY_ORDER,
+  ABILITY_STORAGE_KEY,
   COLOR_STORAGE_KEY,
   NEON_COLORS,
   NICKNAME_STORAGE_KEY,
-  THEME_STORAGE_KEY,
 } from "./constants";
 import {
   colyseusClient,
@@ -19,8 +22,9 @@ import {
 import { soundManager } from "./audio/SoundManager";
 import { HomeScreen } from "./components/HomeScreen";
 import { LobbyScreen } from "./components/LobbyScreen";
-import { GameHUD } from "./components/GameHUD";
+import { GameHUD, type KillFeedEntry } from "./components/GameHUD";
 import { GameCanvas } from "./game/GameCanvas";
+import type { InputManager } from "./game/InputManager";
 import type { LocalArena } from "./game/LocalArena";
 
 function getInitialRoomParam(): string {
@@ -28,15 +32,21 @@ function getInitialRoomParam(): string {
   return (params.get("room") || "").trim().toUpperCase();
 }
 
+function getInitialAbility(): AbilityType {
+  const raw = localStorage.getItem(ABILITY_STORAGE_KEY) as AbilityType | null;
+  if (raw && ABILITY_ORDER.includes(raw)) return raw;
+  return "dash";
+}
+
 export const App: React.FC = () => {
   const [nickname, setNickname] = useState<string>(
-    () => localStorage.getItem(NICKNAME_STORAGE_KEY) || "Agente"
+    () => localStorage.getItem(NICKNAME_STORAGE_KEY) || "Jugador"
   );
   const [selectedColor, setSelectedColor] = useState<string>(
     () => localStorage.getItem(COLOR_STORAGE_KEY) || NEON_COLORS[0].hex
   );
-  const [selectedTheme, setSelectedTheme] = useState<string>(
-    () => localStorage.getItem(THEME_STORAGE_KEY) || "random"
+  const [selectedAbility, setSelectedAbility] = useState<AbilityType>(() =>
+    getInitialAbility()
   );
   const [initialRoomCode] = useState<string>(() => getInitialRoomParam());
 
@@ -44,20 +54,32 @@ export const App: React.FC = () => {
     colyseusClient.getSnapshot()
   );
   const [lastRoundEnd, setLastRoundEnd] = useState<RoundEndEvent | null>(null);
+  const [killFeed, setKillFeed] = useState<KillFeedEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [localMode, setLocalMode] = useState(false);
   const [localModifier, setLocalModifier] = useState<RoundModifier>("normal");
-  const [localTheme, setLocalTheme] = useState<ArenaTheme>("cyber_outpost");
+  const [localMapDims, setLocalMapDims] = useState({ w: 1600, h: 1200, storm: 1100 });
   const [localPlayers, setLocalPlayers] = useState<Record<string, PlayerState>>(
     {}
   );
   const [localLootItems, setLocalLootItems] = useState<
     Record<string, LootItemState>
   >({});
+
   const localArenaRef = useRef<LocalArena | null>(null);
+  const inputManagerRef = useRef<InputManager | null>(null);
   const autoJoinedRef = useRef(false);
+  const killSeqRef = useRef(0);
+
+  const pushKillFeed = useCallback((ev: KillFeedEvent) => {
+    const id = `kf_${++killSeqRef.current}_${Date.now()}`;
+    setKillFeed((prev) => [{ ...ev, id }, ...prev].slice(0, 5));
+    window.setTimeout(() => {
+      setKillFeed((prev) => prev.filter((item) => item.id !== id));
+    }, 5500);
+  }, []);
 
   const handleNicknameChange = (name: string) => {
     setNickname(name);
@@ -69,9 +91,9 @@ export const App: React.FC = () => {
     localStorage.setItem(COLOR_STORAGE_KEY, color);
   };
 
-  const handleThemeChange = (theme: string) => {
-    setSelectedTheme(theme);
-    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  const handleAbilityChange = (ability: AbilityType) => {
+    setSelectedAbility(ability);
+    localStorage.setItem(ABILITY_STORAGE_KEY, ability);
   };
 
   useEffect(() => {
@@ -87,6 +109,10 @@ export const App: React.FC = () => {
       soundManager.playRoundWin();
     });
 
+    const unsubKillFeed = colyseusClient.onKillFeed((ev) => {
+      pushKillFeed(ev);
+    });
+
     const unsubDisconnect = colyseusClient.onDisconnect((reason) => {
       if (reason) setError(reason);
     });
@@ -94,18 +120,19 @@ export const App: React.FC = () => {
     return () => {
       unsubState();
       unsubRoundEnd();
+      unsubKillFeed();
       unsubDisconnect();
     };
-  }, []);
+  }, [pushKillFeed]);
 
   const handleCreateRoom = async () => {
     setError(null);
     setLoading(true);
     try {
       await colyseusClient.createRoom(
-        nickname.trim() || "Agente",
+        nickname.trim() || "Jugador",
         selectedColor,
-        selectedTheme
+        selectedAbility
       );
     } catch (err) {
       setError(
@@ -124,8 +151,9 @@ export const App: React.FC = () => {
     try {
       await colyseusClient.joinRoomByCode(
         code,
-        nickname.trim() || "Agente",
-        selectedColor
+        nickname.trim() || "Jugador",
+        selectedColor,
+        selectedAbility
       );
     } catch (err) {
       setError(
@@ -148,24 +176,36 @@ export const App: React.FC = () => {
 
   const handleStartLocalMode = () => {
     setError(null);
+    setKillFeed([]);
     localArenaRef.current = null;
     setLocalLootItems({});
     setLocalPlayers({
       "local-player": {
         id: "local-player",
-        name: nickname.trim() || "Agente",
-        x: 180,
-        y: 180,
+        name: nickname.trim() || "Jugador",
+        x: 170,
+        y: 170,
         angle: 0,
         color: selectedColor,
         hp: 100,
         maxHp: 100,
+        shield: 0,
+        maxShield: 50,
         alive: true,
+        isDowned: false,
+        downedTimerMs: 0,
         score: 0,
+        streak: 0,
+        hasBounty: false,
         ready: true,
         weapon: "pistol",
-        inventory: ["pistol"],
-        activeSlot: 0,
+        ability: selectedAbility,
+        abilityCooldownMs: 0,
+        shieldActive: false,
+        hasHotPotato: false,
+        hotPotatoTimerMs: 0,
+        isInvisible: false,
+        isAirborne: false,
       },
     });
     setLocalMode(true);
@@ -177,110 +217,114 @@ export const App: React.FC = () => {
       setLocalMode(false);
       setLocalPlayers({});
       setLocalLootItems({});
+      setKillFeed([]);
       return;
     }
     await colyseusClient.leaveRoom();
     setLastRoundEnd(null);
+    setKillFeed([]);
   };
 
-  const handleResetLocalArena = () => {
-    if (localArenaRef.current) {
-      localArenaRef.current.resetArena(false);
-      setLocalPlayers({ ...localArenaRef.current.players });
-      setLocalModifier(localArenaRef.current.modifier);
-      setLocalTheme(localArenaRef.current.theme);
-      setLocalLootItems({ ...localArenaRef.current.lootItems });
-    }
-  };
+  const handleTriggerEmote = useCallback(
+    (emote: EmoteType) => {
+      if (localMode) {
+        inputManagerRef.current?.triggerEmote(emote);
+      } else {
+        colyseusClient.sendEmote(emote);
+      }
+    },
+    [localMode]
+  );
 
-  const handleSelectLocalTheme = useCallback((nextTheme: ArenaTheme) => {
-    if (localArenaRef.current) {
-      localArenaRef.current.setPreferredTheme(nextTheme);
-      localArenaRef.current.resetArena(true);
-      setLocalPlayers({ ...localArenaRef.current.players });
-      setLocalModifier(localArenaRef.current.modifier);
-      setLocalTheme(localArenaRef.current.theme);
-      setLocalLootItems({ ...localArenaRef.current.lootItems });
-    }
-  }, []);
-
-  const handleLocalSelectSlot = useCallback((slot: number) => {
-    if (localArenaRef.current) {
-      localArenaRef.current.selectSlot(slot);
-      setLocalPlayers({ ...localArenaRef.current.players });
-    }
-  }, []);
-
-  const handleOnlineSelectSlot = useCallback((slot: number) => {
-    colyseusClient.selectSlot(slot);
+  const handleTriggerAbility = useCallback(() => {
+    inputManagerRef.current?.triggerAbility();
   }, []);
 
   const handleLocalStateSync = useCallback(
     (
       players: Record<string, PlayerState>,
       modifier: RoundModifier,
-      theme: ArenaTheme,
-      lootItems: Record<string, LootItemState>
+      lootItems: Record<string, LootItemState>,
+      mapWidth: number,
+      mapHeight: number,
+      stormRadius: number
     ) => {
       setLocalPlayers(players);
       setLocalModifier(modifier);
-      setLocalTheme(theme);
       setLocalLootItems(lootItems);
+      setLocalMapDims({ w: mapWidth, h: mapHeight, storm: stormRadius });
     },
     []
   );
 
-  // 1. Modo Arena Práctica Local
+  // 1. Modo de Prueba Local (Sin Servidor)
   if (localMode) {
     return (
       <div className="relative h-screen w-screen overflow-hidden bg-slate-950">
         <GameHUD
           mode="local"
           status="playing"
-          theme={localTheme}
           modifier={localModifier}
           sessionId="local-player"
           players={localPlayers}
           lootItems={localLootItems}
+          killFeed={killFeed}
           lastRoundEnd={null}
           onLeave={() => void handleLeave()}
-          onSelectSlot={handleLocalSelectSlot}
-          onResetLocalArena={handleResetLocalArena}
-          onSelectLocalTheme={handleSelectLocalTheme}
+          onTriggerEmote={handleTriggerEmote}
+          onTriggerAbility={handleTriggerAbility}
+          onResetLocalArena={() => {
+            localArenaRef.current?.resetArena();
+          }}
+          onCycleLocalWeapon={() => {
+            localArenaRef.current?.cycleWeapon();
+          }}
+          onCycleLocalModifier={() => {
+            localArenaRef.current?.cycleModifier();
+          }}
+          onSelectLocalAbility={(ab) => {
+            handleAbilityChange(ab);
+            localArenaRef.current?.setLocalAbility(ab);
+          }}
         />
         <GameCanvas
           mode="local"
-          mapWidth={1600}
-          mapHeight={1200}
-          theme={localTheme}
+          mapWidth={localMapDims.w}
+          mapHeight={localMapDims.h}
+          stormRadius={localMapDims.storm}
+          stormX={localMapDims.w / 2}
+          stormY={localMapDims.h / 2}
           modifier={localModifier}
           obstacles={{}}
+          hazardZones={{}}
           lootItems={localLootItems}
           players={localPlayers}
           bullets={{}}
           localSessionId="local-player"
+          localAbility={selectedAbility}
           isPlaying={true}
-          localTheme={selectedTheme}
+          inputManagerRef={inputManagerRef}
           localArenaRef={localArenaRef}
           onLocalStateSync={handleLocalStateSync}
+          onKillFeed={pushKillFeed}
         />
       </div>
     );
   }
 
-  // 2. Pantalla Principal (Home)
+  // 2. Pantalla de Inicio
   if (!snapshot) {
     return (
       <HomeScreen
         nickname={nickname}
         selectedColor={selectedColor}
-        selectedTheme={selectedTheme}
+        selectedAbility={selectedAbility}
         initialRoomCode={initialRoomCode}
         loading={loading}
         error={error}
         onNicknameChange={handleNicknameChange}
         onColorChange={handleColorChange}
-        onThemeChange={handleThemeChange}
+        onAbilityChange={handleAbilityChange}
         onCreateRoom={() => void handleCreateRoom()}
         onJoinRoom={(code) => void handleJoinRoom(code)}
         onStartLocalMode={handleStartLocalMode}
@@ -295,48 +339,54 @@ export const App: React.FC = () => {
         roomCode={snapshot.roomCode}
         sessionId={snapshot.sessionId}
         players={snapshot.players}
-        theme={snapshot.theme}
-        preferredTheme={snapshot.preferredTheme}
-        onSelectTheme={(t) => colyseusClient.selectTheme(t)}
         onToggleReady={() => colyseusClient.toggleReady()}
         onStartGame={() => colyseusClient.startGame()}
         onUpdateColor={(color) => {
           handleColorChange(color);
           colyseusClient.updateProfile({ color });
         }}
+        onUpdateAbility={(ability) => {
+          handleAbilityChange(ability);
+          colyseusClient.updateProfile({ ability });
+        }}
         onLeaveRoom={() => void handleLeave()}
       />
     );
   }
 
-  // 4. Combate en Arena Online / Fin de Ronda
+  // 4. Arena Multijugador Online
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-slate-950">
       <GameHUD
         mode="online"
         roomCode={snapshot.roomCode}
         status={snapshot.status}
-        theme={snapshot.theme}
         modifier={snapshot.modifier}
         sessionId={snapshot.sessionId}
         players={snapshot.players}
         lootItems={snapshot.lootItems}
+        killFeed={killFeed}
         lastRoundEnd={lastRoundEnd}
         onLeave={() => void handleLeave()}
-        onSelectSlot={handleOnlineSelectSlot}
+        onTriggerEmote={handleTriggerEmote}
+        onTriggerAbility={handleTriggerAbility}
       />
       <GameCanvas
         mode="online"
         mapWidth={snapshot.mapWidth}
         mapHeight={snapshot.mapHeight}
-        theme={snapshot.theme}
+        stormRadius={snapshot.stormRadius}
+        stormX={snapshot.stormX}
+        stormY={snapshot.stormY}
         modifier={snapshot.modifier}
         obstacles={snapshot.obstacles}
+        hazardZones={snapshot.hazardZones}
         lootItems={snapshot.lootItems}
         players={snapshot.players}
         bullets={snapshot.bullets}
         localSessionId={snapshot.sessionId}
         isPlaying={snapshot.status === "playing"}
+        inputManagerRef={inputManagerRef}
       />
     </div>
   );

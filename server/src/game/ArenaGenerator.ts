@@ -1,11 +1,11 @@
 import type {
-  ArenaTheme,
   LootItemState,
   ObstacleState,
   ObstacleType,
   RoundModifier,
   WeaponType,
 } from "@shared/types";
+import { NORMAL_CRATE_WEAPONS, SPECIAL_WEAPONS } from "./WeaponConfig";
 
 export interface SpawnPoint {
   x: number;
@@ -16,7 +16,6 @@ export interface SpawnPoint {
 export interface ArenaLayout {
   mapWidth: number;
   mapHeight: number;
-  theme: ArenaTheme;
   spawnPoints: SpawnPoint[];
   obstacles: ObstacleState[];
 }
@@ -27,64 +26,49 @@ interface ObstacleSpec {
   radius: number;
   hp: number;
   maxHp: number;
+  awake?: boolean;
 }
 
-// Cada mapa temático tiene proporciones de cobertura distintas para variar también la táctica
-const THEME_OBSTACLE_SPECS: Record<ArenaTheme, ObstacleSpec[]> = {
-  cyber_outpost: [
-    { type: "rock", count: 10, radius: 38, hp: 9999, maxHp: 9999 },
-    { type: "tree", count: 10, radius: 22, hp: 9999, maxHp: 9999 },
-    { type: "crate", count: 15, radius: 28, hp: 40, maxHp: 40 },
-  ],
-  midnight: [
-    { type: "rock", count: 9, radius: 38, hp: 9999, maxHp: 9999 },
-    { type: "tree", count: 15, radius: 22, hp: 9999, maxHp: 9999 },
-    { type: "crate", count: 14, radius: 28, hp: 40, maxHp: 40 },
-  ],
-  arctic: [
-    { type: "rock", count: 13, radius: 38, hp: 9999, maxHp: 9999 },
-    { type: "tree", count: 9, radius: 22, hp: 9999, maxHp: 9999 },
-    { type: "crate", count: 15, radius: 28, hp: 40, maxHp: 40 },
-  ],
-  desert: [
-    { type: "rock", count: 12, radius: 40, hp: 9999, maxHp: 9999 },
-    { type: "tree", count: 7, radius: 22, hp: 9999, maxHp: 9999 },
-    { type: "crate", count: 16, radius: 28, hp: 40, maxHp: 40 },
-  ],
-};
-
-const LOOT_WEAPONS: WeaponType[] = [
-  "smg",
-  "shotgun",
-  "rifle",
-  "burst",
-  "plasma",
-  "sniper",
-];
-
-export const ARENA_THEMES: ArenaTheme[] = [
-  "cyber_outpost",
-  "midnight",
-  "arctic",
-  "desert",
-];
-
-const ROUND_MODIFIERS: RoundModifier[] = [
+export const ALL_ROUND_MODIFIERS: RoundModifier[] = [
   "normal",
   "speed_boost",
   "ricochet",
   "vampire",
   "double_damage",
+  "hot_potato",
+  "sniper_zero_g",
+  "tiny_shotgun",
+  "all_invisible",
+  "giant_bullets",
 ];
 
 export class ArenaGenerator {
   public static readonly MAP_WIDTH = 1600;
   public static readonly MAP_HEIGHT = 1200;
-  public static readonly SPAWN_CLEAR_RADIUS = 160;
-  public static readonly OBSTACLE_PADDING = 22;
-  public static readonly EDGE_MARGIN = 64;
+  public static readonly TINY_MAP_WIDTH = 900;
+  public static readonly TINY_MAP_HEIGHT = 700;
+
+  public static readonly SPAWN_CLEAR_RADIUS = 135;
+  public static readonly OBSTACLE_PADDING = 18;
+  public static readonly EDGE_MARGIN = 56;
 
   private static lootSeq = 0;
+
+  public static getDimensionsForModifier(modifier: RoundModifier): {
+    mapWidth: number;
+    mapHeight: number;
+  } {
+    if (modifier === "tiny_shotgun") {
+      return {
+        mapWidth: ArenaGenerator.TINY_MAP_WIDTH,
+        mapHeight: ArenaGenerator.TINY_MAP_HEIGHT,
+      };
+    }
+    return {
+      mapWidth: ArenaGenerator.MAP_WIDTH,
+      mapHeight: ArenaGenerator.MAP_HEIGHT,
+    };
+  }
 
   public static getSpawnPoints(
     mapWidth: number = ArenaGenerator.MAP_WIDTH,
@@ -92,11 +76,14 @@ export class ArenaGenerator {
   ): SpawnPoint[] {
     const centerX = mapWidth / 2;
     const centerY = mapHeight / 2;
+    const marginX = Math.min(170, Math.round(mapWidth * 0.16));
+    const marginY = Math.min(170, Math.round(mapHeight * 0.16));
+
     const rawSpawns = [
-      { x: 180, y: 180 },
-      { x: 1420, y: 180 },
-      { x: 180, y: 1020 },
-      { x: 1420, y: 1020 },
+      { x: marginX, y: marginY },
+      { x: mapWidth - marginX, y: marginY },
+      { x: marginX, y: mapHeight - marginY },
+      { x: mapWidth - marginX, y: mapHeight - marginY },
     ];
 
     return rawSpawns.map((pt) => ({
@@ -106,34 +93,76 @@ export class ArenaGenerator {
     }));
   }
 
-  public static pickTheme(preferredTheme?: string, prevTheme?: ArenaTheme): ArenaTheme {
-    if (
-      preferredTheme &&
-      ARENA_THEMES.includes(preferredTheme as ArenaTheme)
-    ) {
-      return preferredTheme as ArenaTheme;
-    }
-
-    const candidates = prevTheme
-      ? ARENA_THEMES.filter((t) => t !== prevTheme)
-      : ARENA_THEMES;
-    return candidates[Math.floor(Math.random() * candidates.length)];
-  }
-
   public static generate(
-    mapWidth: number = ArenaGenerator.MAP_WIDTH,
-    mapHeight: number = ArenaGenerator.MAP_HEIGHT,
-    theme: ArenaTheme = "cyber_outpost"
+    modifier: RoundModifier = "normal",
+    customWidth?: number,
+    customHeight?: number
   ): ArenaLayout {
+    const dims = ArenaGenerator.getDimensionsForModifier(modifier);
+    const mapWidth = customWidth ?? dims.mapWidth;
+    const mapHeight = customHeight ?? dims.mapHeight;
+    const isCompact = mapWidth <= 1000;
+
     const spawnPoints = ArenaGenerator.getSpawnPoints(mapWidth, mapHeight);
     const obstacles: ObstacleState[] = [];
-    const specs = THEME_OBSTACLE_SPECS[theme] || THEME_OBSTACLE_SPECS.cyber_outpost;
     let obstacleCounter = 0;
+
+    // 1. Caja Dorada (80 HP) siempre en el centro exacto del mapa
+    obstacles.push({
+      id: `obs_golden_crate_${++obstacleCounter}`,
+      type: "golden_crate",
+      x: Math.round(mapWidth / 2),
+      y: Math.round(mapHeight / 2),
+      radius: 34,
+      hp: 80,
+      maxHp: 80,
+      awake: false,
+    });
+
+    // 2. Primero ubicamos todos los elementos interactivos obligatorios y luego la cobertura estática
+    const specs: ObstacleSpec[] = [
+      { type: "explosive_barrel", count: 5, radius: 23, hp: 25, maxHp: 25 },
+      { type: "oil_barrel", count: 4, radius: 23, hp: 20, maxHp: 20 },
+      {
+        type: "mimic_crate",
+        count: 2,
+        radius: 27,
+        hp: 35,
+        maxHp: 35,
+        awake: false,
+      },
+      { type: "jump_pad", count: 2, radius: 30, hp: 9999, maxHp: 9999 },
+      { type: "bush", count: 6, radius: 40, hp: 9999, maxHp: 9999 },
+      {
+        type: "crate",
+        count: isCompact ? 6 : 12,
+        radius: 27,
+        hp: 40,
+        maxHp: 40,
+      },
+      {
+        type: "rock",
+        count: isCompact ? 4 : 9,
+        radius: 36,
+        hp: 9999,
+        maxHp: 9999,
+      },
+      {
+        type: "tree",
+        count: isCompact ? 4 : 9,
+        radius: 22,
+        hp: 9999,
+        maxHp: 9999,
+      },
+    ];
+
+    const spawnClear = isCompact ? 105 : ArenaGenerator.SPAWN_CLEAR_RADIUS;
+    const padding = isCompact ? 12 : ArenaGenerator.OBSTACLE_PADDING;
 
     for (const spec of specs) {
       let placed = 0;
       let attempts = 0;
-      const maxAttempts = spec.count * 120;
+      const maxAttempts = spec.count * 220;
 
       while (placed < spec.count && attempts < maxAttempts) {
         attempts++;
@@ -148,7 +177,7 @@ export class ArenaGenerator {
 
         let nearSpawn = false;
         for (const sp of spawnPoints) {
-          const minSpawnDist = ArenaGenerator.SPAWN_CLEAR_RADIUS + spec.radius;
+          const minSpawnDist = spawnClear + spec.radius;
           const dx = x - sp.x;
           const dy = y - sp.y;
           if (dx * dx + dy * dy < minSpawnDist * minSpawnDist) {
@@ -160,8 +189,7 @@ export class ArenaGenerator {
 
         let overlapsObstacle = false;
         for (const other of obstacles) {
-          const minDist =
-            spec.radius + other.radius + ArenaGenerator.OBSTACLE_PADDING;
+          const minDist = spec.radius + other.radius + padding;
           const dx = x - other.x;
           const dy = y - other.y;
           if (dx * dx + dy * dy < minDist * minDist) {
@@ -179,6 +207,7 @@ export class ArenaGenerator {
           radius: spec.radius,
           hp: spec.hp,
           maxHp: spec.maxHp,
+          awake: spec.awake ?? false,
         });
         placed++;
       }
@@ -187,23 +216,21 @@ export class ArenaGenerator {
     return {
       mapWidth,
       mapHeight,
-      theme,
       spawnPoints,
       obstacles,
     };
   }
 
-  public static generateLootFromCrate(
-    x: number,
-    y: number,
-    customId?: string
-  ): LootItemState {
-    const id = customId ?? `loot_${++ArenaGenerator.lootSeq}_${Date.now()}`;
+  /** Botín de caja normal (40 HP): shotgun, rifle, sniper, medkit (+35 HP) o shield (+25). */
+  public static generateLootFromCrate(x: number, y: number): LootItemState {
+    const id = `loot_${++ArenaGenerator.lootSeq}_${Date.now()}`;
     const roll = Math.random();
 
-    if (roll < 0.74) {
+    if (roll < 0.56) {
       const weaponType =
-        LOOT_WEAPONS[Math.floor(Math.random() * LOOT_WEAPONS.length)];
+        NORMAL_CRATE_WEAPONS[
+          Math.floor(Math.random() * NORMAL_CRATE_WEAPONS.length)
+        ];
       return {
         id,
         kind: "weapon",
@@ -213,12 +240,48 @@ export class ArenaGenerator {
       };
     }
 
+    if (roll < 0.8) {
+      return {
+        id,
+        kind: "medkit",
+        x,
+        y,
+        amount: 35,
+      };
+    }
+
     return {
       id,
-      kind: "medkit",
+      kind: "shield",
       x,
       y,
+      amount: 25,
     };
+  }
+
+  /** Botín de Caja Dorada (80 HP): Arma especial aleatoria + Poción +50 Shield. */
+  public static generateLootFromGoldenCrate(
+    x: number,
+    y: number
+  ): LootItemState[] {
+    const specialWeapon = ArenaGenerator.pickRandomSpecialWeapon();
+    const now = Date.now();
+    return [
+      {
+        id: `loot_${++ArenaGenerator.lootSeq}_${now}`,
+        kind: "weapon",
+        weaponType: specialWeapon,
+        x: x - 20,
+        y,
+      },
+      {
+        id: `loot_${++ArenaGenerator.lootSeq}_${now}`,
+        kind: "shield",
+        x: x + 20,
+        y,
+        amount: 50,
+      },
+    ];
   }
 
   public static generateWeaponDrop(
@@ -235,7 +298,14 @@ export class ArenaGenerator {
     };
   }
 
-  public static pickRandomModifier(): RoundModifier {
-    return ROUND_MODIFIERS[Math.floor(Math.random() * ROUND_MODIFIERS.length)];
+  public static pickRandomSpecialWeapon(): WeaponType {
+    return SPECIAL_WEAPONS[Math.floor(Math.random() * SPECIAL_WEAPONS.length)];
+  }
+
+  public static pickRandomModifier(prev?: RoundModifier): RoundModifier {
+    const pool = prev
+      ? ALL_ROUND_MODIFIERS.filter((m) => m !== prev)
+      : ALL_ROUND_MODIFIERS;
+    return pool[Math.floor(Math.random() * pool.length)];
   }
 }

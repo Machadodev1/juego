@@ -1,37 +1,29 @@
-# BALA PERDIDA ⚡🎯
+# BALA PERDIDA 💥🎯
 
-Juego multijugador online **Arena Táctica Sci-Fi 2D** hasta para 4 agentes por sala, con estética cyber-táctica propia, 4 escenarios temáticos con clima dinámico, cápsulas de suministro destructibles, inventario de 3 armas y modificadores de ronda sobre un servidor autoritativo.
+**Top-Down Arena Shooter 2D caótico estilo ZombsRoyale.io** hasta para 4 jugadores por sala, con armas doradas especiales, habilidades activas, trampas interactivas en el mapa, Último Aliento, zona de tormenta y 10 mutadores locos por ronda sobre un servidor autoritativo.
 
 ## Estructura del Monorepo
-- `/client`: Frontend en React + Vite + Tailwind CSS + PixiJS v8 + Colyseus.js + Web Audio (`http://localhost:5173`).
-- `/server`: Servidor autoritativo en Node.js + TypeScript + Colyseus + Matter.js (`ws://localhost:2567`).
-- `/shared`: Fuente única de verdad de contratos e interfaces TypeScript (`shared/types.ts`).
-- `vercel.json`: Configuración de **Vercel Services** (`client` + `server` bajo `/api/(.*)` y `/(.*)`).
+- `/shared`: Fuente única de verdad de contratos TypeScript (`shared/types.ts`).
+- `/server`: Servidor autoritativo en Node.js + TypeScript + Colyseus + Matter.js (`ws://localhost:2567`, sala `"tank_room"`).
+- `/client`: Frontend en React + Vite + Tailwind CSS + PixiJS v8 + Colyseus.js + Howler.js (`http://localhost:5173`).
+- `vercel.json`: Configuración lista para **Vercel Services** (`client` + `server`).
 
-## Inicio Rápido (Desarrollo Local)
+## Inicio Rápido
 
 ```bash
-# 1. Instalar dependencias de servidor y cliente
+# 1. Instalar dependencias en /server y /client
 npm run install:all
 
-# 2. Levantar servidor (puerto 2567) y cliente (puerto 5173) simultáneamente
+# 2. Levantar servidor (:2567) y cliente (:5173) simultáneamente
 npm run dev
-```
 
-## Compilación de Producción
-
-```bash
+# 3. Compilar ambos paquetes para producción
 npm run build
 ```
 
-## Mapas Temáticos y Mecánicas
-- **4 Escenarios con Ambiente Dinámico (`1600x1200`):**
-  - ⚡ **Estación Cyber (`cyber_outpost`):** Cubierta hexagonal metálica, pilones energéticos y domos holográficos.
-  - 🌙 **Bosque Nocturno (`midnight`):** Visibilidad focal nocturna, cristales violetas luminosos y luciérnagas.
-  - ❄️ **Tundra Ártica (`arctic`):** Placas de hielo glacial, ventisca de nieve, pinos helados y cápsulas térmicas.
-  - 🏜️ **Dunas Solares (`desert`):** Mesetas de arenisca, ráfagas de arena y cactus florales.
-- **7 Armas y Selector de 3 Ranuras:**
-  - **Pistola Táctica** (arma inicial), **Subfusil**, **Escopeta**, **Rifle de Asalto**, **Ráfaga Triple**, **Cañón de Plasma** (rebote natural) y **Francotirador** (`65 DMG`), además de **Botiquines** (`+35 HP`).
-  - Recolección manual acercándose al arma y pulsando **`E`** (sin recoger armas accidentalmente al caminar encima).
-  - Cambio instantáneo entre las 3 ranuras con **`1` / `2` / `3`**, **rueda del ratón**, **`Q` / `R`** o haciendo clic en el HUD.
-- **Modificadores por Ronda:** `normal`, `speed_boost` (`1.4x`), `ricochet` (`+2` rebotes), `vampire` (`+25 HP` por eliminación) y `double_damage` (`2x`).
+## Mecánicas Principales
+- **9 Armas:** `pistol`, `shotgun`, `rifle`, `sniper` + 5 armas doradas en la Caja Dorada central (`impulse_gun`, `flamethrower`, `saw_disc` boomerang, `bee_cannon` teledirigido y `grappling_hook`).
+- **4 Habilidades Activas (`Espacio` / `Click Derecho`):** `dash`, `energy_shield` (refleja balas frontales), `proximity_mine` y `smoke_grenade`.
+- **Entorno Caótico:** Caja Dorada central (`80 HP`), Barriles Explosivos con reacción en cadena, Barriles de Aceite inflamables, Arbustos de sigilo, Trampolines con onda sísmica al aterrizar y Cajas Trampa (*Mimics*) que persiguen y explotan.
+- **Último Aliento, Bounty y Tormenta:** Gateo de `4s` al caer a `0 HP` con posibilidad de revivir (`30 HP`) acertando un tiro, recompensa de líder (`2+` victorias seguidas) y anillo de tormenta a partir de los `35s`.
+- **10 Mutadores por Ronda:** `normal`, `speed_boost`, `ricochet`, `vampire`, `double_damage`, `hot_potato`, `sniper_zero_g`, `tiny_shotgun`, `all_invisible` y `giant_bullets`.
