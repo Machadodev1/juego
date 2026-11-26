@@ -24,7 +24,10 @@ class SoundManager {
       return ctx;
     }
 
-    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
     if (!AudioCtx) return null;
 
     this.fallbackCtx = new AudioCtx();
@@ -70,19 +73,19 @@ class SoundManager {
 
     osc.type = "sawtooth";
     osc.frequency.setValueAtTime(520, now);
-    osc.frequency.exponentialRampToValueAtTime(110, now + 0.11);
+    osc.frequency.exponentialRampToValueAtTime(110, now + 0.09);
 
-    gain.gain.setValueAtTime(0.18, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+    gain.gain.setValueAtTime(0.14, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
 
     osc.connect(gain);
     gain.connect(ctx.destination);
 
     osc.start(now);
-    osc.stop(now + 0.12);
+    osc.stop(now + 0.1);
   }
 
-  public playBounce(): void {
+  public playHit(): void {
     const ctx = this.getAudioContext();
     if (!ctx) return;
 
@@ -91,17 +94,63 @@ class SoundManager {
     const gain = ctx.createGain();
 
     osc.type = "triangle";
-    osc.frequency.setValueAtTime(1150, now);
-    osc.frequency.exponentialRampToValueAtTime(620, now + 0.07);
+    osc.frequency.setValueAtTime(880, now);
+    osc.frequency.exponentialRampToValueAtTime(360, now + 0.06);
 
-    gain.gain.setValueAtTime(0.14, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+    gain.gain.setValueAtTime(0.12, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
 
     osc.connect(gain);
     gain.connect(ctx.destination);
 
     osc.start(now);
-    osc.stop(now + 0.08);
+    osc.stop(now + 0.07);
+  }
+
+  public playCrateBreak(): void {
+    const ctx = this.getAudioContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.getNoiseBuffer(ctx);
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = "bandpass";
+    filter.frequency.setValueAtTime(650, now);
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.24, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+
+    noise.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+
+    noise.start(now);
+    noise.stop(now + 0.22);
+  }
+
+  public playPickup(): void {
+    const ctx = this.getAudioContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(587.33, now);
+    osc.frequency.setValueAtTime(880, now + 0.06);
+
+    gain.gain.setValueAtTime(0.13, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start(now);
+    osc.stop(now + 0.16);
   }
 
   public playExplosion(): void {
@@ -110,7 +159,6 @@ class SoundManager {
 
     const now = ctx.currentTime;
 
-    // Noise burst
     const noise = ctx.createBufferSource();
     noise.buffer = this.getNoiseBuffer(ctx);
 
@@ -120,7 +168,7 @@ class SoundManager {
     filter.frequency.exponentialRampToValueAtTime(120, now + 0.42);
 
     const noiseGain = ctx.createGain();
-    noiseGain.gain.setValueAtTime(0.32, now);
+    noiseGain.gain.setValueAtTime(0.3, now);
     noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
 
     noise.connect(filter);
@@ -129,14 +177,13 @@ class SoundManager {
     noise.start(now);
     noise.stop(now + 0.45);
 
-    // Sub-bass punch
     const sub = ctx.createOscillator();
     const subGain = ctx.createGain();
     sub.type = "sine";
     sub.frequency.setValueAtTime(140, now);
     sub.frequency.exponentialRampToValueAtTime(32, now + 0.35);
 
-    subGain.gain.setValueAtTime(0.35, now);
+    subGain.gain.setValueAtTime(0.32, now);
     subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
 
     sub.connect(subGain);

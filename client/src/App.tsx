@@ -1,11 +1,14 @@
-import React, { useEffect, useRef, useState } from "react";
-import type { PlayerState, RoundEndEvent } from "@shared/types";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import type { PlayerState, RoundEndEvent, RoundModifier } from "@shared/types";
 import {
   COLOR_STORAGE_KEY,
   NEON_COLORS,
   NICKNAME_STORAGE_KEY,
 } from "./constants";
-import { colyseusClient, type TankRoomSnapshot } from "./network/ColyseusClient";
+import {
+  colyseusClient,
+  type TankRoomSnapshot,
+} from "./network/ColyseusClient";
 import { soundManager } from "./audio/SoundManager";
 import { HomeScreen } from "./components/HomeScreen";
 import { LobbyScreen } from "./components/LobbyScreen";
@@ -20,7 +23,7 @@ function getInitialRoomParam(): string {
 
 export const App: React.FC = () => {
   const [nickname, setNickname] = useState<string>(
-    () => localStorage.getItem(NICKNAME_STORAGE_KEY) || "Piloto"
+    () => localStorage.getItem(NICKNAME_STORAGE_KEY) || "Cazador"
   );
   const [selectedColor, setSelectedColor] = useState<string>(
     () => localStorage.getItem(COLOR_STORAGE_KEY) || NEON_COLORS[0].hex
@@ -35,7 +38,10 @@ export const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
 
   const [localMode, setLocalMode] = useState(false);
-  const [localPlayers, setLocalPlayers] = useState<Record<string, PlayerState>>({});
+  const [localModifier, setLocalModifier] = useState<RoundModifier>("normal");
+  const [localPlayers, setLocalPlayers] = useState<Record<string, PlayerState>>(
+    {}
+  );
   const localArenaRef = useRef<LocalArena | null>(null);
   const autoJoinedRef = useRef(false);
 
@@ -77,10 +83,13 @@ export const App: React.FC = () => {
     setError(null);
     setLoading(true);
     try {
-      await colyseusClient.createRoom(nickname.trim() || "Piloto", selectedColor);
+      await colyseusClient.createRoom(
+        nickname.trim() || "Cazador",
+        selectedColor
+      );
     } catch (err) {
       setError(
-        err instanceof Error
+        err instanceof Error && err.message
           ? `No se pudo crear la sala: ${err.message}`
           : "No se pudo conectar con el servidor."
       );
@@ -95,12 +104,12 @@ export const App: React.FC = () => {
     try {
       await colyseusClient.joinRoomByCode(
         code,
-        nickname.trim() || "Piloto",
+        nickname.trim() || "Cazador",
         selectedColor
       );
     } catch (err) {
       setError(
-        err instanceof Error
+        err instanceof Error && err.message
           ? `No se pudo unir a la sala ${code}: ${err.message}`
           : `No se pudo unir a la sala ${code}.`
       );
@@ -109,7 +118,6 @@ export const App: React.FC = () => {
     }
   };
 
-  // Auto-join if ?room=XXXX is present in the invite URL
   useEffect(() => {
     if (initialRoomCode && !autoJoinedRef.current && !snapshot && !localMode) {
       autoJoinedRef.current = true;
@@ -124,14 +132,17 @@ export const App: React.FC = () => {
     setLocalPlayers({
       "local-player": {
         id: "local-player",
-        name: nickname.trim() || "Piloto",
-        x: 120,
-        y: 120,
+        name: nickname.trim() || "Cazador",
+        x: 180,
+        y: 180,
         angle: 0,
         color: selectedColor,
+        hp: 100,
+        maxHp: 100,
         alive: true,
         score: 0,
         ready: true,
+        weapon: "pistol",
       },
     });
     setLocalMode(true);
@@ -148,42 +159,55 @@ export const App: React.FC = () => {
     setLastRoundEnd(null);
   };
 
-  const handleResetLocalMaze = () => {
+  const handleResetLocalArena = () => {
     if (localArenaRef.current) {
-      localArenaRef.current.resetMaze();
+      localArenaRef.current.resetArena();
       setLocalPlayers({ ...localArenaRef.current.players });
+      setLocalModifier(localArenaRef.current.modifier);
     }
   };
 
-  // 1. Local Sandbox Arena
+  const handleLocalStateSync = useCallback(
+    (players: Record<string, PlayerState>, modifier: RoundModifier) => {
+      setLocalPlayers(players);
+      setLocalModifier(modifier);
+    },
+    []
+  );
+
+  // 1. Modo Arena Práctica Local
   if (localMode) {
     return (
       <div className="relative h-screen w-screen overflow-hidden bg-slate-950">
         <GameHUD
           mode="local"
           status="playing"
+          modifier={localModifier}
           sessionId="local-player"
           players={localPlayers}
-          winnerId=""
           lastRoundEnd={null}
           onLeave={() => void handleLeave()}
-          onResetLocalMaze={handleResetLocalMaze}
+          onResetLocalArena={handleResetLocalArena}
         />
         <GameCanvas
           mode="local"
-          maze={null}
+          mapWidth={1600}
+          mapHeight={1200}
+          modifier={localModifier}
+          obstacles={{}}
+          lootItems={{}}
           players={localPlayers}
           bullets={{}}
           localSessionId="local-player"
           isPlaying={true}
           localArenaRef={localArenaRef}
-          onLocalScoreChange={setLocalPlayers}
+          onLocalStateSync={handleLocalStateSync}
         />
       </div>
     );
   }
 
-  // 2. Home Screen
+  // 2. Pantalla Principal (Home)
   if (!snapshot) {
     return (
       <HomeScreen
@@ -201,7 +225,7 @@ export const App: React.FC = () => {
     );
   }
 
-  // 3. Lobby Screen
+  // 3. Sala de Espera (Lobby)
   if (snapshot.status === "waiting") {
     return (
       <LobbyScreen
@@ -219,22 +243,26 @@ export const App: React.FC = () => {
     );
   }
 
-  // 4. Active Game / Round End
+  // 4. Combate en Arena Online / Fin de Ronda
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-slate-950">
       <GameHUD
         mode="online"
         roomCode={snapshot.roomCode}
         status={snapshot.status}
+        modifier={snapshot.modifier}
         sessionId={snapshot.sessionId}
         players={snapshot.players}
-        winnerId={snapshot.winnerId}
         lastRoundEnd={lastRoundEnd}
         onLeave={() => void handleLeave()}
       />
       <GameCanvas
         mode="online"
-        maze={snapshot.maze}
+        mapWidth={snapshot.mapWidth}
+        mapHeight={snapshot.mapHeight}
+        modifier={snapshot.modifier}
+        obstacles={snapshot.obstacles}
+        lootItems={snapshot.lootItems}
         players={snapshot.players}
         bullets={snapshot.bullets}
         localSessionId={snapshot.sessionId}
