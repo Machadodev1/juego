@@ -1,32 +1,95 @@
-import { Schema, MapSchema, type } from "@colyseus/schema";
+import { Schema, MapSchema, defineTypes } from "@colyseus/schema";
 import type { BulletState, PlayerState, RoomStatus } from "@shared/types";
 
 export class PlayerSchema extends Schema implements PlayerState {
-  @type("string") id: string = "";
-  @type("string") name: string = "Tanque";
-  @type("number") x: number = 0;
-  @type("number") y: number = 0;
-  @type("number") angle: number = 0;
-  @type("string") color: string = "#3B82F6";
-  @type("boolean") alive: boolean = true;
-  @type("number") score: number = 0;
-  @type("boolean") ready: boolean = false;
+  declare id: string;
+  declare name: string;
+  declare x: number;
+  declare y: number;
+  declare angle: number;
+  declare color: string;
+  declare alive: boolean;
+  declare score: number;
+  declare ready: boolean;
+
+  constructor() {
+    super();
+    this.id = "";
+    this.name = "Tanque";
+    this.x = 0;
+    this.y = 0;
+    this.angle = 0;
+    this.color = "#22D3EE";
+    this.alive = true;
+    this.score = 0;
+    this.ready = false;
+  }
 }
+
+defineTypes(PlayerSchema, {
+  id: "string",
+  name: "string",
+  x: "number",
+  y: "number",
+  angle: "number",
+  color: "string",
+  alive: "boolean",
+  score: "number",
+  ready: "boolean",
+});
 
 export class BulletSchema extends Schema implements BulletState {
-  @type("string") id: string = "";
-  @type("string") ownerId: string = "";
-  @type("number") x: number = 0;
-  @type("number") y: number = 0;
-  @type("number") vx: number = 0;
-  @type("number") vy: number = 0;
+  declare id: string;
+  declare ownerId: string;
+  declare x: number;
+  declare y: number;
+  declare vx: number;
+  declare vy: number;
+
+  constructor() {
+    super();
+    this.id = "";
+    this.ownerId = "";
+    this.x = 0;
+    this.y = 0;
+    this.vx = 0;
+    this.vy = 0;
+  }
 }
 
+defineTypes(BulletSchema, {
+  id: "string",
+  ownerId: "string",
+  x: "number",
+  y: "number",
+  vx: "number",
+  vy: "number",
+});
+
 export class TankRoomState extends Schema {
-  @type("string") status: RoomStatus = "waiting";
-  @type("string") roomCode: string = "";
-  @type("string") mazeJson: string = "";
-  @type("string") winnerId: string = "";
-  @type({ map: PlayerSchema }) players = new MapSchema<PlayerSchema>();
-  @type({ map: BulletSchema }) bullets = new MapSchema<BulletSchema>();
+  declare status: RoomStatus;
+  declare roomCode: string;
+  declare mazeJson: string;
+  declare winnerId: string;
+  declare players: MapSchema<PlayerSchema>;
+  declare bullets: MapSchema<BulletSchema>;
+
+  constructor() {
+    super();
+    this.status = "waiting";
+    this.roomCode = "";
+    this.mazeJson = "";
+    this.winnerId = "";
+    this.players = new MapSchema<PlayerSchema>();
+    this.bullets = new MapSchema<BulletSchema>();
+  }
 }
+
+defineTypes(TankRoomState, {
+  status: "string",
+  roomCode: "string",
+  mazeJson: "string",
+  winnerId: "string",
+  players: { map: PlayerSchema },
+  bullets: { map: BulletSchema },
+});
