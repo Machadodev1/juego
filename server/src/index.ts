@@ -44,7 +44,7 @@ app.use(
 );
 app.use(express.json());
 
-app.get(["/health", "/api/health", "/api"], (_req, res) => {
+app.get(["/", "/health", "/api/health", "/api"], (_req, res) => {
   res.json({
     status: "ok",
     game: "Bala Perdida",
