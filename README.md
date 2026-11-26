@@ -11,3 +11,4 @@ Juego multijugador online de combate de tanques en laberintos 2D con física de 
 - `main`: Código estable e integrado.
 - `feat/client`: Desarrollo del Frontend, renderizado 2D y cliente online.
 - `feat/server`: Desarrollo del Backend autoritativo, físicas y generación de laberintos.
+# juego
