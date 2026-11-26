@@ -30,16 +30,17 @@ interface ReadyPayload {
 }
 
 const DEFAULT_COLORS = [
-  "#EF4444", // Rojo
-  "#3B82F6", // Azul
-  "#10B981", // Verde
-  "#F59E0B", // Ámbar
+  "#22D3EE", // Cian Neón
+  "#EC4899", // Magenta
+  "#A3E635", // Lima Ácido
+  "#F59E0B", // Ámbar Solar
   "#8B5CF6", // Violeta
-  "#EC4899", // Rosa
+  "#EF4444", // Rojo
 ];
 
 const WINNING_SCORE = 5;
 const ROUND_END_DELAY_MS = 3000;
+const CHAMPION_END_DELAY_MS = 4500;
 const TICK_RATE_HZ = 60;
 const ROOM_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -48,6 +49,7 @@ export class TankRoom extends Room<TankRoomState> {
 
   private physics!: PhysicsEngine;
   private playerInputs: Map<string, PlayerInput> = new Map();
+  private shootLatched: Map<string, boolean> = new Map();
   private roundTransitionTimer: Delayed | null = null;
   private roundEndingScheduled: boolean = false;
   private static activeRoomCodes: Set<string> = new Set();
@@ -65,9 +67,12 @@ export class TankRoom extends Room<TankRoomState> {
     this.state.status = "waiting";
     TankRoom.activeRoomCodes.add(requestedCode);
 
-    // Permitir que filterBy(['roomCode']) funcione con el roomCode asignado al crear la sala
+    // Registrar roomCode directamente en el RoomListing del MatchMaker para que filterBy(['roomCode']) funcione al unirse por código
     options.roomCode = requestedCode;
-    this.setMetadata({ roomCode: requestedCode });
+    if (this.listing) {
+      (this.listing as unknown as Record<string, unknown>).roomCode = requestedCode;
+    }
+    void this.setMetadata({ roomCode: requestedCode });
 
     // Inicializar motor de físicas con callbacks para emitir eventos de red a los clientes
     this.physics = new PhysicsEngine({
@@ -93,7 +98,8 @@ export class TankRoom extends Room<TankRoomState> {
     // Registrar handlers de mensajes desde el cliente
     this.registerMessageHandlers();
 
-    // Bucle físico fijo a 60 Hz
+    // Sincronización de red a 30 Hz y bucle físico fijo a 60 Hz
+    this.setPatchRate(1000 / 30);
     this.setSimulationInterval((deltaTime) => {
       this.updateSimulation(deltaTime);
     }, 1000 / TICK_RATE_HZ);
@@ -121,6 +127,7 @@ export class TankRoom extends Room<TankRoomState> {
     }
 
     this.state.players.set(client.sessionId, player);
+    this.shootLatched.set(client.sessionId, false);
     this.playerInputs.set(client.sessionId, {
       up: false,
       down: false,
@@ -134,6 +141,7 @@ export class TankRoom extends Room<TankRoomState> {
   onLeave(client: Client): void {
     this.physics.removeTank(client.sessionId);
     this.playerInputs.delete(client.sessionId);
+    this.shootLatched.delete(client.sessionId);
     this.state.players.delete(client.sessionId);
 
     if (this.state.status === "playing") {
@@ -189,16 +197,13 @@ export class TankRoom extends Room<TankRoomState> {
       }
     });
 
-    // 3. Mensaje "startGame": permite iniciar partida cuando hay >= 2 jugadores
+    // 3. Mensaje "startGame": permite iniciar partida cuando hay >= 2 jugadores en la sala
     this.onMessage("startGame", (client) => {
       if (this.state.status !== "waiting") return;
       if (this.state.players.size < 2) return;
+      if (!this.state.players.has(client.sessionId)) return;
 
-      // Verificar que quien envía sea el primer jugador de la sala (host) o que todos estén listos
-      const firstPlayerId = Array.from(this.state.players.keys())[0];
-      if (client.sessionId === firstPlayerId || this.areAllPlayersReady()) {
-        this.startNewMatch();
-      }
+      this.startNewMatch();
     });
 
     // 4. Mensaje "input" (o PlayerInput directo): controles del tanque durante "playing"
@@ -207,12 +212,17 @@ export class TankRoom extends Room<TankRoomState> {
       const player = this.state.players.get(client.sessionId);
       if (!player || !player.alive) return;
 
+      const shootPressed = Boolean(input.shoot);
+      if (shootPressed) {
+        this.shootLatched.set(client.sessionId, true);
+      }
+
       this.playerInputs.set(client.sessionId, {
         up: Boolean(input.up),
         down: Boolean(input.down),
         left: Boolean(input.left),
         right: Boolean(input.right),
-        shoot: Boolean(input.shoot),
+        shoot: shootPressed,
         seq: typeof input.seq === "number" ? input.seq : 0,
       });
     };
@@ -237,6 +247,7 @@ export class TankRoom extends Room<TankRoomState> {
   }
 
   private startNewMatch(): void {
+    void this.lock();
     this.state.winnerId = "";
     for (const player of this.state.players.values()) {
       player.score = 0;
@@ -268,6 +279,7 @@ export class TankRoom extends Room<TankRoomState> {
       player.angle = spawn.angle;
       player.alive = true;
 
+      this.shootLatched.set(id, false);
       this.playerInputs.set(id, {
         up: false,
         down: false,
@@ -301,7 +313,15 @@ export class TankRoom extends Room<TankRoomState> {
       const input = this.playerInputs.get(playerId);
       if (!input) continue;
 
-      const spawnedBullet = this.physics.applyPlayerInput(playerId, input, now);
+      const latchedShoot = Boolean(this.shootLatched.get(playerId));
+      this.shootLatched.set(playerId, false);
+
+      const effectiveInput: PlayerInput = {
+        ...input,
+        shoot: input.shoot || latchedShoot,
+      };
+
+      const spawnedBullet = this.physics.applyPlayerInput(playerId, effectiveInput, now);
       if (spawnedBullet) {
         const bulletSchema = new BulletSchema();
         bulletSchema.id = spawnedBullet.id;
@@ -391,7 +411,9 @@ export class TankRoom extends Room<TankRoomState> {
     };
     this.broadcast("roundEnd", roundEndEvent);
 
-    // Esperar 3 segundos antes de generar el siguiente laberinto o volver a waiting si hay campeón
+    const transitionDelay = championId ? CHAMPION_END_DELAY_MS : ROUND_END_DELAY_MS;
+
+    // Esperar antes de generar el siguiente laberinto o volver a waiting si hay campeón
     this.roundTransitionTimer = this.clock.setTimeout(() => {
       if (this.state.players.size < 2) {
         this.returnToWaiting(false);
@@ -404,7 +426,7 @@ export class TankRoom extends Room<TankRoomState> {
       } else {
         this.startNewRound();
       }
-    }, ROUND_END_DELAY_MS);
+    }, transitionDelay);
   }
 
   private returnToWaiting(resetScores: boolean): void {
@@ -416,6 +438,10 @@ export class TankRoom extends Room<TankRoomState> {
     this.physics.resetRound();
     this.state.bullets.clear();
     this.state.status = "waiting";
+
+    if (this.clients.length < this.maxClients) {
+      void this.unlock();
+    }
 
     for (const player of this.state.players.values()) {
       player.ready = false;

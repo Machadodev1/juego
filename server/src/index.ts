@@ -13,11 +13,21 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN || "http://localhost:5173";
 
 const app = express();
 
+const allowedOrigins = CORS_ORIGIN.split(",").map((o) => o.trim());
+
 app.use(
   cors({
-    origin: CORS_ORIGIN.includes(",")
-      ? CORS_ORIGIN.split(",").map((o) => o.trim())
-      : [CORS_ORIGIN, "http://localhost:5173", "http://127.0.0.1:5173"],
+    origin: (origin, callback) => {
+      if (
+        !origin ||
+        allowedOrigins.includes(origin) ||
+        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+      ) {
+        callback(null, true);
+      } else {
+        callback(null, false);
+      }
+    },
     credentials: true,
   })
 );

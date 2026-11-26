@@ -42,11 +42,12 @@ export class PhysicsEngine {
   public static readonly WALL_THICKNESS = 6;
 
   public static readonly BULLET_RADIUS = 4;
-  public static readonly BULLET_SPEED = 5.5;
+  public static readonly BULLET_SPEED = 5.5; // px por tick (60Hz) => 330 px/s
+  public static readonly TICKS_PER_SECOND = 60;
   public static readonly BULLET_TTL_MS = 8000;
   public static readonly MAX_BULLETS_PER_TANK = 5;
   public static readonly SELF_HIT_GRACE_MS = 150;
-  public static readonly SHOOT_COOLDOWN_MS = 180;
+  public static readonly SHOOT_COOLDOWN_MS = 280;
 
   private engine: Matter.Engine;
   private world: Matter.World;
@@ -250,12 +251,11 @@ export class PhysicsEngine {
     const vy = Math.sin(nextAngle) * linearSpeed;
     Matter.Body.setVelocity(body, { x: vx, y: vy });
 
-    // 3. Disparo (detectar flanco de subida o disparo con cooldown respetando máx 5 balas activas)
+    // 3. Disparo con cooldown respetando máximo 5 balas activas por tanque
     let spawnedBullet: BulletState | null = null;
-    const triggerPull = input.shoot && !tank.lastShootInput;
     const cooldownReady = now - tank.lastShootTime >= PhysicsEngine.SHOOT_COOLDOWN_MS;
 
-    if (triggerPull && cooldownReady) {
+    if (input.shoot && cooldownReady) {
       spawnedBullet = this.trySpawnBullet(tank, now);
     }
     tank.lastShootInput = input.shoot;
@@ -264,7 +264,8 @@ export class PhysicsEngine {
   }
 
   /**
-   * Intenta disparar una bala desde la punta del cañón del tanque.
+   * Intenta disparar una bala desde la punta del cañón del tanque, evitando
+   * atravesar muros cuando el cañón está pegado a una pared.
    */
   public trySpawnBullet(tank: InternalTank, now: number = Date.now()): BulletState | null {
     const activeByOwner = this.countBulletsForOwner(tank.id);
@@ -275,11 +276,28 @@ export class PhysicsEngine {
     tank.lastShootTime = now;
 
     const angle = tank.body.angle;
-    const muzzleOffset = PhysicsEngine.TANK_WIDTH / 2 + PhysicsEngine.BULLET_RADIUS + 2;
-    const spawnX = tank.body.position.x + Math.cos(angle) * muzzleOffset;
-    const spawnY = tank.body.position.y + Math.sin(angle) * muzzleOffset;
-    const vx = Math.cos(angle) * PhysicsEngine.BULLET_SPEED;
-    const vy = Math.sin(angle) * PhysicsEngine.BULLET_SPEED;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+
+    const standardOffset = PhysicsEngine.TANK_WIDTH / 2 + PhysicsEngine.BULLET_RADIUS + 1; // 22px
+    const rayTarget = {
+      x: tank.body.position.x + cos * (standardOffset + PhysicsEngine.BULLET_RADIUS),
+      y: tank.body.position.y + sin * (standardOffset + PhysicsEngine.BULLET_RADIUS),
+    };
+
+    const wallHits = Matter.Query.ray(
+      this.wallBodies,
+      tank.body.position,
+      rayTarget,
+      PhysicsEngine.BULLET_RADIUS * 2
+    );
+
+    // Si hay un muro pegado frente al cañón, generar dentro de la celda para que rebote limpio
+    const muzzleOffset = wallHits.length > 0 ? 11 : standardOffset;
+    const spawnX = tank.body.position.x + cos * muzzleOffset;
+    const spawnY = tank.body.position.y + sin * muzzleOffset;
+    const stepVx = cos * PhysicsEngine.BULLET_SPEED;
+    const stepVy = sin * PhysicsEngine.BULLET_SPEED;
 
     const bulletId = `b_${++this.bulletCounter}_${now}`;
     const body = Matter.Bodies.circle(
@@ -301,7 +319,7 @@ export class PhysicsEngine {
       }
     );
 
-    Matter.Body.setVelocity(body, { x: vx, y: vy });
+    Matter.Body.setVelocity(body, { x: stepVx, y: stepVy });
     Matter.Composite.add(this.world, body);
 
     this.bullets.set(bulletId, {
@@ -317,8 +335,8 @@ export class PhysicsEngine {
       ownerId: tank.id,
       x: spawnX,
       y: spawnY,
-      vx,
-      vy,
+      vx: stepVx * PhysicsEngine.TICKS_PER_SECOND,
+      vy: stepVy * PhysicsEngine.TICKS_PER_SECOND,
     };
   }
 
@@ -337,7 +355,8 @@ export class PhysicsEngine {
    * procesa expiraciones TTL de 8s, normaliza velocidades de balas y ejecuta bajas.
    */
   public update(deltaMs: number = 1000 / 60, now: number = Date.now()): void {
-    Matter.Engine.update(this.engine, deltaMs);
+    const fixedStep = Math.min(deltaMs, 1000 / PhysicsEngine.TICKS_PER_SECOND);
+    Matter.Engine.update(this.engine, fixedStep);
 
     // 1. Procesar destrucciones de tanques detectadas durante las colisiones
     if (this.tanksToDestroy.length > 0) {
@@ -463,15 +482,44 @@ export class PhysicsEngine {
         ownerId: bullet.ownerId,
         x: bullet.body.position.x,
         y: bullet.body.position.y,
-        vx: bullet.body.velocity.x,
-        vy: bullet.body.velocity.y,
+        vx: bullet.body.velocity.x * PhysicsEngine.TICKS_PER_SECOND,
+        vy: bullet.body.velocity.y * PhysicsEngine.TICKS_PER_SECOND,
       });
     }
     return list;
   }
 
+  private handleTankHitPair(
+    bulletBody: Matter.Body,
+    otherBody: Matter.Body,
+    now: number
+  ): void {
+    if (!otherBody.label.startsWith("tank:")) return;
+
+    const bulletId = bulletBody.label.slice("bullet:".length);
+    const bullet = this.bullets.get(bulletId);
+    if (!bullet || this.bulletsToDestroy.has(bulletId)) return;
+
+    const victimId = otherBody.label.slice("tank:".length);
+    const victimTank = this.tanks.get(victimId);
+    if (!victimTank || !victimTank.alive) return;
+
+    // Ignorar el propio tanque durante los primeros 150 ms tras disparar
+    const elapsedMs = now - bullet.createdAt;
+    if (victimId === bullet.ownerId && elapsedMs < PhysicsEngine.SELF_HIT_GRACE_MS) {
+      return;
+    }
+
+    this.bulletsToDestroy.add(bulletId);
+    this.tanksToDestroy.push({
+      victimId,
+      killerId: bullet.ownerId,
+      x: victimTank.body.position.x,
+      y: victimTank.body.position.y,
+    });
+  }
+
   private registerCollisionEvents(): void {
-    // Usamos beforeUpdate / collisionStart / collisionEnd para gestionar impactos
     Matter.Events.on(this.engine, "collisionStart", (event) => {
       const now = Date.now();
 
@@ -492,26 +540,20 @@ export class PhysicsEngine {
             x: bulletBody.position.x,
             y: bulletBody.position.y,
           });
-        } else if (otherBody.label.startsWith("tank:")) {
-          const victimId = otherBody.label.slice("tank:".length);
-          const victimTank = this.tanks.get(victimId);
-          if (!victimTank || !victimTank.alive) continue;
-
-          // Ignorar el propio tanque durante los primeros 150 ms tras disparar
-          const elapsedMs = now - bullet.createdAt;
-          if (victimId === bullet.ownerId && elapsedMs < PhysicsEngine.SELF_HIT_GRACE_MS) {
-            continue;
-          }
-
-          // Destruir bala y marcar tanque como destruido
-          this.bulletsToDestroy.add(bulletId);
-          this.tanksToDestroy.push({
-            victimId,
-            killerId: bullet.ownerId,
-            x: victimTank.body.position.x,
-            y: victimTank.body.position.y,
-          });
+        } else {
+          this.handleTankHitPair(bulletBody, otherBody, now);
         }
+      }
+    });
+
+    Matter.Events.on(this.engine, "collisionActive", (event) => {
+      const now = Date.now();
+      for (const pair of event.pairs) {
+        const { bodyA, bodyB } = pair;
+        const bulletBody = this.extractBodyByPrefix(bodyA, bodyB, "bullet:");
+        if (!bulletBody) continue;
+        const otherBody = bulletBody === bodyA ? bodyB : bodyA;
+        this.handleTankHitPair(bulletBody, otherBody, now);
       }
     });
 
