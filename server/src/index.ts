@@ -152,5 +152,4 @@ if (isVercel) {
   });
 }
 
-export { app, httpServer, gameServer };
 export default httpServer;
