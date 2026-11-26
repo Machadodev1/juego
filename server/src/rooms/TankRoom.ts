@@ -1,16 +1,21 @@
 import { Client, Delayed, Room } from "colyseus";
-import {
-  BulletBounceEvent,
+import type {
+  BulletHitEvent,
+  CrateDestroyedEvent,
+  LootItemState,
+  PlayerEliminatedEvent,
   PlayerInput,
   RoundEndEvent,
-  TankDestroyedEvent,
+  WeaponType,
 } from "@shared/types";
 import {
   BulletSchema,
+  GameRoomState,
+  LootItemSchema,
+  ObstacleSchema,
   PlayerSchema,
-  TankRoomState,
-} from "./schema/TankRoomState";
-import { MazeGenerator } from "../game/MazeGenerator";
+} from "./schema/GameRoomState";
+import { ArenaGenerator } from "../game/ArenaGenerator";
 import { PhysicsEngine } from "../game/PhysicsEngine";
 
 interface JoinOptions {
@@ -30,32 +35,33 @@ interface ReadyPayload {
 }
 
 const DEFAULT_COLORS = [
-  "#22D3EE", // Cian Neón
+  "#22D3EE", // Cian
   "#EC4899", // Magenta
-  "#A3E635", // Lima Ácido
-  "#F59E0B", // Ámbar Solar
+  "#A3E635", // Lima
+  "#F59E0B", // Ámbar
   "#8B5CF6", // Violeta
   "#EF4444", // Rojo
 ];
 
 const WINNING_SCORE = 5;
-const ROUND_END_DELAY_MS = 3000;
-const CHAMPION_END_DELAY_MS = 4500;
+const ROUND_END_DELAY_MS = 3500;
 const TICK_RATE_HZ = 60;
 const ROOM_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
-export class TankRoom extends Room<TankRoomState> {
+export class TankRoom extends Room<GameRoomState> {
   public maxClients = 4;
 
   private physics!: PhysicsEngine;
   private playerInputs: Map<string, PlayerInput> = new Map();
   private shootLatched: Map<string, boolean> = new Map();
+  private interactLatched: Map<string, boolean> = new Map();
   private roundTransitionTimer: Delayed | null = null;
   private roundEndingScheduled: boolean = false;
+
   private static activeRoomCodes: Set<string> = new Set();
 
   onCreate(options: JoinOptions): void {
-    this.setState(new TankRoomState());
+    this.setState(new GameRoomState());
 
     const requestedCode =
       typeof options?.roomCode === "string" &&
@@ -65,41 +71,75 @@ export class TankRoom extends Room<TankRoomState> {
 
     this.state.roomCode = requestedCode;
     this.state.status = "waiting";
+    this.state.modifier = "normal";
+    this.state.mapWidth = ArenaGenerator.MAP_WIDTH;
+    this.state.mapHeight = ArenaGenerator.MAP_HEIGHT;
+
     TankRoom.activeRoomCodes.add(requestedCode);
 
-    // Registrar roomCode directamente en el RoomListing del MatchMaker para que filterBy(['roomCode']) funcione al unirse por código
+    // Registrar roomCode en el RoomListing de Colyseus para que filterBy(["roomCode"]) funcione al unirse
     options.roomCode = requestedCode;
     if (this.listing) {
       (this.listing as unknown as Record<string, unknown>).roomCode = requestedCode;
     }
     void this.setMetadata({ roomCode: requestedCode });
 
-    // Inicializar motor de físicas con callbacks para emitir eventos de red a los clientes
     this.physics = new PhysicsEngine({
-      onBulletBounce: (event: BulletBounceEvent) => {
-        this.broadcast("bulletBounce", event);
+      onBulletHit: (event: BulletHitEvent) => {
+        this.broadcast("bulletHit", event);
       },
-      onTankDestroyed: (event: TankDestroyedEvent) => {
+      onObstacleDamaged: (obstacleId: string, hp: number) => {
+        const obs = this.state.obstacles.get(obstacleId);
+        if (obs) {
+          obs.hp = hp;
+        }
+      },
+      onCrateDestroyed: (event: CrateDestroyedEvent, spawnedLoot: LootItemState) => {
+        this.state.obstacles.delete(event.id);
+        this.addLootToState(spawnedLoot);
+        this.broadcast("crateDestroyed", event);
+      },
+      onPlayerDamaged: (playerId: string, hp: number) => {
+        const player = this.state.players.get(playerId);
+        if (player) {
+          player.hp = hp;
+        }
+      },
+      onPlayerHealed: (playerId: string, hp: number) => {
+        const player = this.state.players.get(playerId);
+        if (player) {
+          player.hp = hp;
+        }
+      },
+      onPlayerWeaponChanged: (playerId: string, weapon: WeaponType) => {
+        const player = this.state.players.get(playerId);
+        if (player) {
+          player.weapon = weapon;
+        }
+      },
+      onPlayerEliminated: (event: PlayerEliminatedEvent) => {
         const victim = this.state.players.get(event.victimId);
         if (victim) {
+          victim.hp = 0;
           victim.alive = false;
         }
-        this.broadcast("tankDestroyed", event);
+        this.broadcast("playerEliminated", event);
         this.checkRoundEndCondition();
       },
       onBulletRemoved: (bulletId: string) => {
         this.state.bullets.delete(bulletId);
       },
+      onLootPickedUp: (lootId: string) => {
+        this.state.lootItems.delete(lootId);
+      },
     });
 
-    // Generar un laberinto inicial para previsualización o primera partida
-    this.generateAndLoadMaze();
+    // Generar una arena inicial para previsualización / primera partida
+    this.generateAndLoadArena();
 
-    // Registrar handlers de mensajes desde el cliente
     this.registerMessageHandlers();
 
-    // Sincronización de red a 30 Hz y bucle físico fijo a 60 Hz
-    this.setPatchRate(1000 / 30);
+    this.setPatchRate(1000 / TICK_RATE_HZ);
     this.setSimulationInterval((deltaTime) => {
       this.updateSimulation(deltaTime);
     }, 1000 / TICK_RATE_HZ);
@@ -107,41 +147,46 @@ export class TankRoom extends Room<TankRoomState> {
 
   onJoin(client: Client, options: JoinOptions): void {
     const playerIndex = this.state.players.size;
-    const player = new PlayerSchema();
+    const spawns = ArenaGenerator.getSpawnPoints(
+      this.state.mapWidth,
+      this.state.mapHeight
+    );
+    const spawn = spawns[playerIndex % spawns.length];
 
+    const player = new PlayerSchema();
     player.id = client.sessionId;
     player.name = this.sanitizeName(options?.name, playerIndex + 1);
     player.color = this.sanitizeColor(options?.color, playerIndex);
+    player.x = spawn.x;
+    player.y = spawn.y;
+    player.angle = spawn.angle;
+    player.hp = PhysicsEngine.PLAYER_MAX_HP;
+    player.maxHp = PhysicsEngine.PLAYER_MAX_HP;
     player.alive = this.state.status === "waiting";
     player.score = 0;
     player.ready = false;
-
-    // Ubicar en un punto del laberinto actual
-    const currentMaze = JSON.parse(this.state.mazeJson);
-    const spawns = MazeGenerator.getSpawnPoints(currentMaze, 4);
-    const spawn = spawns[playerIndex % spawns.length];
-    if (spawn) {
-      player.x = spawn.x;
-      player.y = spawn.y;
-      player.angle = spawn.angle;
-    }
+    player.weapon = "pistol";
 
     this.state.players.set(client.sessionId, player);
     this.shootLatched.set(client.sessionId, false);
+    this.interactLatched.set(client.sessionId, false);
     this.playerInputs.set(client.sessionId, {
       up: false,
       down: false,
       left: false,
       right: false,
+      angle: spawn.angle,
       shoot: false,
+      interact: false,
       seq: 0,
     });
   }
 
   onLeave(client: Client): void {
-    this.physics.removeTank(client.sessionId);
+    this.physics.removePlayer(client.sessionId);
     this.playerInputs.delete(client.sessionId);
     this.shootLatched.delete(client.sessionId);
+    this.interactLatched.delete(client.sessionId);
     this.state.players.delete(client.sessionId);
 
     if (this.state.status === "playing") {
@@ -166,7 +211,21 @@ export class TankRoom extends Room<TankRoomState> {
   }
 
   private registerMessageHandlers(): void {
-    // 1. Mensaje "ready": marca o alterna el estado listo del jugador en la sala de espera
+    // 1. "updateProfile": actualiza name y color mientras status === "waiting"
+    this.onMessage("updateProfile", (client, payload: ProfileUpdatePayload) => {
+      if (this.state.status !== "waiting") return;
+      const player = this.state.players.get(client.sessionId);
+      if (!player || !payload) return;
+
+      if (typeof payload.name === "string" && payload.name.trim().length > 0) {
+        player.name = this.sanitizeName(payload.name, 1);
+      }
+      if (typeof payload.color === "string" && payload.color.trim().length > 0) {
+        player.color = this.sanitizeColor(payload.color, 0);
+      }
+    });
+
+    // 2. "ready": alterna player.ready en "waiting" e inicia cuando >= 2 jugadores están listos
     this.onMessage("ready", (client, payload?: ReadyPayload | boolean) => {
       if (this.state.status !== "waiting") return;
       const player = this.state.players.get(client.sessionId);
@@ -183,46 +242,45 @@ export class TankRoom extends Room<TankRoomState> {
       this.checkAutoStart();
     });
 
-    // 2. Mensaje "updateProfile": actualiza nombre y/o color del tanque en "waiting"
-    this.onMessage("updateProfile", (client, payload: ProfileUpdatePayload) => {
-      if (this.state.status !== "waiting") return;
-      const player = this.state.players.get(client.sessionId);
-      if (!player || !payload) return;
-
-      if (typeof payload.name === "string" && payload.name.trim().length > 0) {
-        player.name = this.sanitizeName(payload.name, 1);
-      }
-      if (typeof payload.color === "string" && payload.color.trim().length > 0) {
-        player.color = this.sanitizeColor(payload.color, 0);
-      }
-    });
-
-    // 3. Mensaje "startGame": permite iniciar partida cuando hay >= 2 jugadores en la sala
+    // Soporte opcional de inicio directo ("startGame") cuando hay >= 2 jugadores
     this.onMessage("startGame", (client) => {
       if (this.state.status !== "waiting") return;
       if (this.state.players.size < 2) return;
       if (!this.state.players.has(client.sessionId)) return;
 
-      this.startNewMatch();
+      this.startMatch();
     });
 
-    // 4. Mensaje "input" (o PlayerInput directo): controles del tanque durante "playing"
+    // 3. "input": guarda el último PlayerInput para aplicarlo en el ciclo físico a 60 Hz
     const handleInput = (client: Client, input: PlayerInput) => {
       if (this.state.status !== "playing" || !input) return;
       const player = this.state.players.get(client.sessionId);
       if (!player || !player.alive) return;
 
       const shootPressed = Boolean(input.shoot);
+      const interactPressed = Boolean(input.interact);
+
       if (shootPressed) {
         this.shootLatched.set(client.sessionId, true);
       }
+      if (interactPressed) {
+        this.interactLatched.set(client.sessionId, true);
+      }
+
+      const prevInput = this.playerInputs.get(client.sessionId);
+      const nextAngle =
+        typeof input.angle === "number" && Number.isFinite(input.angle)
+          ? input.angle
+          : prevInput?.angle ?? player.angle;
 
       this.playerInputs.set(client.sessionId, {
         up: Boolean(input.up),
         down: Boolean(input.down),
         left: Boolean(input.left),
         right: Boolean(input.right),
+        angle: nextAngle,
         shoot: shootPressed,
+        interact: interactPressed,
         seq: typeof input.seq === "number" ? input.seq : 0,
       });
     };
@@ -234,7 +292,7 @@ export class TankRoom extends Room<TankRoomState> {
   private checkAutoStart(): void {
     if (this.state.status !== "waiting") return;
     if (this.state.players.size >= 2 && this.areAllPlayersReady()) {
-      this.startNewMatch();
+      this.startMatch();
     }
   }
 
@@ -246,9 +304,8 @@ export class TankRoom extends Room<TankRoomState> {
     return true;
   }
 
-  private startNewMatch(): void {
+  private startMatch(): void {
     void this.lock();
-    this.state.winnerId = "";
     for (const player of this.state.players.values()) {
       player.score = 0;
     }
@@ -262,44 +319,94 @@ export class TankRoom extends Room<TankRoomState> {
     }
     this.roundEndingScheduled = false;
 
-    this.physics.resetRound();
-    this.state.bullets.clear();
+    const nextModifier = ArenaGenerator.pickRandomModifier();
 
-    const maze = this.generateAndLoadMaze();
+    this.state.modifier = nextModifier;
+    this.physics.setModifier(nextModifier);
+
+    const arena = this.generateAndLoadArena();
     const playerIds = Array.from(this.state.players.keys());
-    const spawnPoints = MazeGenerator.getSpawnPoints(maze, playerIds.length);
 
-    playerIds.forEach((id, index) => {
+    // Barajar los 4 puntos de aparición para que las esquinas roten de forma justa cada ronda
+    const shuffledSpawns = [...arena.spawnPoints];
+    for (let i = shuffledSpawns.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffledSpawns[i], shuffledSpawns[j]] = [
+        shuffledSpawns[j],
+        shuffledSpawns[i],
+      ];
+    }
+
+    playerIds.forEach((id, idx) => {
       const player = this.state.players.get(id);
-      const spawn = spawnPoints[index];
+      const spawn = shuffledSpawns[idx % shuffledSpawns.length];
       if (!player || !spawn) return;
 
       player.x = spawn.x;
       player.y = spawn.y;
       player.angle = spawn.angle;
+      player.hp = PhysicsEngine.PLAYER_MAX_HP;
+      player.maxHp = PhysicsEngine.PLAYER_MAX_HP;
       player.alive = true;
+      player.weapon = "pistol";
 
       this.shootLatched.set(id, false);
+      this.interactLatched.set(id, false);
       this.playerInputs.set(id, {
         up: false,
         down: false,
         left: false,
         right: false,
+        angle: spawn.angle,
         shoot: false,
+        interact: false,
         seq: 0,
       });
 
-      this.physics.spawnTank(id, spawn.x, spawn.y, spawn.angle);
+      this.physics.spawnPlayer(id, spawn.x, spawn.y, spawn.angle, "pistol");
     });
 
     this.state.status = "playing";
   }
 
-  private generateAndLoadMaze() {
-    const maze = MazeGenerator.generate(12, 8, 80, 0.12);
-    this.state.mazeJson = JSON.stringify(maze);
-    this.physics.buildMazeWalls(maze);
-    return maze;
+  private generateAndLoadArena() {
+    const arena = ArenaGenerator.generate(
+      ArenaGenerator.MAP_WIDTH,
+      ArenaGenerator.MAP_HEIGHT
+    );
+
+    this.state.mapWidth = arena.mapWidth;
+    this.state.mapHeight = arena.mapHeight;
+    this.state.obstacles.clear();
+    this.state.lootItems.clear();
+    this.state.bullets.clear();
+
+    for (const obs of arena.obstacles) {
+      const obsSchema = new ObstacleSchema();
+      obsSchema.id = obs.id;
+      obsSchema.type = obs.type;
+      obsSchema.x = obs.x;
+      obsSchema.y = obs.y;
+      obsSchema.radius = obs.radius;
+      obsSchema.hp = obs.hp;
+      obsSchema.maxHp = obs.maxHp;
+      this.state.obstacles.set(obs.id, obsSchema);
+    }
+
+    this.physics.loadArena(arena.mapWidth, arena.mapHeight, arena.obstacles);
+    return arena;
+  }
+
+  private addLootToState(loot: LootItemState): void {
+    const schema = new LootItemSchema();
+    schema.id = loot.id;
+    schema.kind = loot.kind;
+    if (loot.weaponType) {
+      schema.weaponType = loot.weaponType;
+    }
+    schema.x = loot.x;
+    schema.y = loot.y;
+    this.state.lootItems.set(loot.id, schema);
   }
 
   private updateSimulation(deltaTime: number): void {
@@ -307,48 +414,60 @@ export class TankRoom extends Room<TankRoomState> {
 
     const now = Date.now();
 
-    // 1. Aplicar inputs de todos los jugadores vivos y registrar nuevas balas disparadas
+    // 1. Aplicar inputs de jugadores vivos y registrar proyectiles disparados
     for (const [playerId, player] of this.state.players.entries()) {
       if (!player.alive) continue;
       const input = this.playerInputs.get(playerId);
       if (!input) continue;
 
       const latchedShoot = Boolean(this.shootLatched.get(playerId));
+      const latchedInteract = Boolean(this.interactLatched.get(playerId));
       this.shootLatched.set(playerId, false);
+      this.interactLatched.set(playerId, false);
 
       const effectiveInput: PlayerInput = {
         ...input,
         shoot: input.shoot || latchedShoot,
+        interact: input.interact || latchedInteract,
       };
 
-      const spawnedBullet = this.physics.applyPlayerInput(playerId, effectiveInput, now);
-      if (spawnedBullet) {
+      const spawnedBullets = this.physics.applyPlayerInput(
+        playerId,
+        effectiveInput,
+        now
+      );
+
+      for (const b of spawnedBullets) {
         const bulletSchema = new BulletSchema();
-        bulletSchema.id = spawnedBullet.id;
-        bulletSchema.ownerId = spawnedBullet.ownerId;
-        bulletSchema.x = spawnedBullet.x;
-        bulletSchema.y = spawnedBullet.y;
-        bulletSchema.vx = spawnedBullet.vx;
-        bulletSchema.vy = spawnedBullet.vy;
-        this.state.bullets.set(spawnedBullet.id, bulletSchema);
+        bulletSchema.id = b.id;
+        bulletSchema.ownerId = b.ownerId;
+        bulletSchema.x = b.x;
+        bulletSchema.y = b.y;
+        bulletSchema.vx = b.vx;
+        bulletSchema.vy = b.vy;
+        bulletSchema.weaponType = b.weaponType;
+        this.state.bullets.set(b.id, bulletSchema);
       }
     }
 
     // 2. Avanzar paso de simulación Matter.js
-    this.physics.update(deltaTime, now);
+    this.physics.update(deltaTime);
 
-    // 3. Sincronizar transformaciones de tanques al estado Colyseus
+    // 3. Sincronizar estado autoritativo de los jugadores
     for (const [playerId, player] of this.state.players.entries()) {
-      const transform = this.physics.getTankTransform(playerId);
-      if (transform) {
-        player.x = transform.x;
-        player.y = transform.y;
-        player.angle = transform.angle;
-        player.alive = transform.alive;
+      const snap = this.physics.getPlayerSnapshot(playerId);
+      if (snap) {
+        player.x = snap.x;
+        player.y = snap.y;
+        player.angle = snap.angle;
+        player.hp = snap.hp;
+        player.maxHp = snap.maxHp;
+        player.alive = snap.alive;
+        player.weapon = snap.weapon;
       }
     }
 
-    // 4. Sincronizar posiciones y velocidades de balas activas al estado Colyseus
+    // 4. Sincronizar estado autoritativo de los proyectiles activos
     const activeBullets = this.physics.getActiveBullets();
     for (const b of activeBullets) {
       let schema = this.state.bullets.get(b.id);
@@ -356,6 +475,7 @@ export class TankRoom extends Room<TankRoomState> {
         schema = new BulletSchema();
         schema.id = b.id;
         schema.ownerId = b.ownerId;
+        schema.weaponType = b.weaponType;
         this.state.bullets.set(b.id, schema);
       }
       schema.x = b.x;
@@ -363,6 +483,9 @@ export class TankRoom extends Room<TankRoomState> {
       schema.vx = b.vx;
       schema.vy = b.vy;
     }
+
+    // 5. Verificar condición de fin de ronda por si la última baja ocurrió en este tick
+    this.checkRoundEndCondition();
   }
 
   private checkRoundEndCondition(): void {
@@ -390,18 +513,15 @@ export class TankRoom extends Room<TankRoomState> {
     if (survivor) {
       survivor.score += 1;
       winnerId = survivor.id;
-      this.state.winnerId = survivor.id;
-    } else {
-      this.state.winnerId = "";
     }
 
     const scores: Record<string, number> = {};
-    let championId: string | null = null;
+    let championReached = false;
 
     for (const [id, player] of this.state.players.entries()) {
       scores[id] = player.score;
       if (player.score >= WINNING_SCORE) {
-        championId = id;
+        championReached = true;
       }
     }
 
@@ -411,22 +531,21 @@ export class TankRoom extends Room<TankRoomState> {
     };
     this.broadcast("roundEnd", roundEndEvent);
 
-    const transitionDelay = championId ? CHAMPION_END_DELAY_MS : ROUND_END_DELAY_MS;
-
-    // Esperar antes de generar el siguiente laberinto o volver a waiting si hay campeón
+    // Tras 3.5 segundos genera nueva arena, nuevo modificador aleatorio y revive a todos (reiniciando marcadores si alguien llegó a 5)
     this.roundTransitionTimer = this.clock.setTimeout(() => {
+      if (championReached) {
+        for (const player of this.state.players.values()) {
+          player.score = 0;
+        }
+      }
+
       if (this.state.players.size < 2) {
         this.returnToWaiting(false);
         return;
       }
 
-      if (championId) {
-        // Alguien llegó a 5 puntos: reiniciar marcadores y volver a "waiting" tras mostrar el campeón
-        this.returnToWaiting(true);
-      } else {
-        this.startNewRound();
-      }
-    }, transitionDelay);
+      this.startNewRound();
+    }, ROUND_END_DELAY_MS);
   }
 
   private returnToWaiting(resetScores: boolean): void {
@@ -435,17 +554,30 @@ export class TankRoom extends Room<TankRoomState> {
       this.roundTransitionTimer = null;
     }
     this.roundEndingScheduled = false;
-    this.physics.resetRound();
-    this.state.bullets.clear();
     this.state.status = "waiting";
+    this.state.modifier = "normal";
+    this.generateAndLoadArena();
 
     if (this.clients.length < this.maxClients) {
       void this.unlock();
     }
 
+    const spawns = ArenaGenerator.getSpawnPoints(
+      this.state.mapWidth,
+      this.state.mapHeight
+    );
+    let idx = 0;
     for (const player of this.state.players.values()) {
+      const sp = spawns[idx % spawns.length];
+      idx++;
       player.ready = false;
       player.alive = true;
+      player.hp = PhysicsEngine.PLAYER_MAX_HP;
+      player.maxHp = PhysicsEngine.PLAYER_MAX_HP;
+      player.weapon = "pistol";
+      player.x = sp.x;
+      player.y = sp.y;
+      player.angle = sp.angle;
       if (resetScores) {
         player.score = 0;
       }
@@ -474,11 +606,14 @@ export class TankRoom extends Room<TankRoomState> {
         return cleaned;
       }
     }
-    return `Tanque ${fallbackNumber}`;
+    return `Jugador ${fallbackNumber}`;
   }
 
   private sanitizeColor(rawColor: string | undefined, index: number): string {
-    if (typeof rawColor === "string" && /^#[0-9A-Fa-f]{6}$/.test(rawColor.trim())) {
+    if (
+      typeof rawColor === "string" &&
+      /^#[0-9A-Fa-f]{6}$/.test(rawColor.trim())
+    ) {
       return rawColor.trim();
     }
     return DEFAULT_COLORS[index % DEFAULT_COLORS.length];

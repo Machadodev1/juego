@@ -1,11 +1,22 @@
 export type RoomStatus = "waiting" | "playing" | "round_end";
 
+export type WeaponType = "pistol" | "shotgun" | "rifle" | "sniper";
+
+export type RoundModifier =
+  | "normal"
+  | "speed_boost"
+  | "ricochet"
+  | "vampire"
+  | "double_damage";
+
 export interface PlayerInput {
   up: boolean;
   down: boolean;
   left: boolean;
   right: boolean;
+  angle: number;
   shoot: boolean;
+  interact: boolean;
   seq: number;
 }
 
@@ -16,9 +27,32 @@ export interface PlayerState {
   y: number;
   angle: number;
   color: string;
+  hp: number;
+  maxHp: number;
   alive: boolean;
   score: number;
   ready: boolean;
+  weapon: WeaponType;
+}
+
+export type ObstacleType = "tree" | "rock" | "crate";
+
+export interface ObstacleState {
+  id: string;
+  type: ObstacleType;
+  x: number;
+  y: number;
+  radius: number;
+  hp: number;
+  maxHp: number;
+}
+
+export interface LootItemState {
+  id: string;
+  kind: "weapon" | "medkit";
+  weaponType?: WeaponType;
+  x: number;
+  y: number;
 }
 
 export interface BulletState {
@@ -28,33 +62,23 @@ export interface BulletState {
   y: number;
   vx: number;
   vy: number;
-}
-
-export interface MazeCell {
-  row: number;
-  col: number;
-  walls: {
-    top: boolean;
-    right: boolean;
-    bottom: boolean;
-    left: boolean;
-  };
-}
-
-export interface MazeGrid {
-  rows: number;
-  cols: number;
-  cellSize: number;
-  cells: MazeCell[][];
+  weaponType: WeaponType;
 }
 
 // Eventos Servidor -> Cliente
-export interface BulletBounceEvent {
+export interface BulletHitEvent {
+  x: number;
+  y: number;
+  targetType: "wall" | "crate" | "player";
+}
+
+export interface CrateDestroyedEvent {
+  id: string;
   x: number;
   y: number;
 }
 
-export interface TankDestroyedEvent {
+export interface PlayerEliminatedEvent {
   victimId: string;
   killerId: string;
   x: number;
