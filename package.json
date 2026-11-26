@@ -4,13 +4,13 @@
   "version": "1.0.0",
   "description": "Monorepo de Bala Perdida (Cliente React + PixiJS v8 y Servidor Colyseus + Matter.js)",
   "scripts": {
-    "install:all": "npm --prefix server install && npm --prefix client install",
-    "dev:server": "npm --prefix server run dev",
-    "dev:client": "npm --prefix client run dev",
-    "dev": "bash -c 'trap \"kill 0\" EXIT INT TERM; npm --prefix server run dev & npm --prefix client run dev & wait'",
-    "build:server": "npm --prefix server run build",
-    "build:client": "npm --prefix client run build",
-    "build": "npm --prefix server run build && npm --prefix client run build",
-    "start": "npm --prefix server run start"
+    "install:all": "(cd server && npm install) && (cd client && npm install)",
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm run dev",
+    "dev": "bash -c 'trap \"kill 0\" EXIT INT TERM; (cd server && npm run dev) & (cd client && npm run dev) & wait'",
+    "build:server": "cd server && npm run build",
+    "build:client": "cd client && npm run build",
+    "build": "(cd server && npm run build) && (cd client && npm run build)",
+    "start": "cd server && npm run start"
   }
 }
