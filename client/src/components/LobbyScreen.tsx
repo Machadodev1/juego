@@ -1,12 +1,23 @@
 import React, { useState } from "react";
-import { Check, Copy, LogOut, Play, ShieldCheck, Users } from "lucide-react";
-import type { PlayerState } from "@shared/types";
-import { NEON_COLORS } from "../constants";
+import {
+  Check,
+  Copy,
+  LogOut,
+  Play,
+  Shuffle,
+  ShieldCheck,
+  Users,
+} from "lucide-react";
+import type { ArenaTheme, PlayerState } from "@shared/types";
+import { NEON_COLORS, THEME_META, THEME_ORDER } from "../constants";
 
 interface LobbyScreenProps {
   roomCode: string;
   sessionId: string;
   players: Record<string, PlayerState>;
+  theme: ArenaTheme;
+  preferredTheme: string;
+  onSelectTheme: (theme: string) => void;
   onToggleReady: () => void;
   onStartGame: () => void;
   onUpdateColor: (color: string) => void;
@@ -17,6 +28,9 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
   roomCode,
   sessionId,
   players,
+  theme,
+  preferredTheme,
+  onSelectTheme,
   onToggleReady,
   onStartGame,
   onUpdateColor,
@@ -35,17 +49,15 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
       setCopied(true);
       setTimeout(() => setCopied(false), 2200);
     } catch {
-      // Fallback
       window.prompt("Copia el enlace de invitación:", inviteUrl);
     }
   };
 
   return (
-    <div className="relative flex min-h-screen w-full items-center justify-center bg-slate-950 bg-neon-grid px-4 py-8">
-      <div className="pointer-events-none absolute top-1/4 left-1/3 h-72 w-72 rounded-full bg-cyan-500/10 blur-3xl" />
+    <div className="relative flex h-full w-full justify-center overflow-y-auto bg-slate-950 bg-neon-grid px-4 py-8">
+      <div className="pointer-events-none fixed left-1/3 top-1/4 h-72 w-72 rounded-full bg-cyan-500/10 blur-3xl" />
 
-      <div className="relative z-10 w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900/90 p-7 shadow-2xl backdrop-blur-xl">
-        {/* Top bar */}
+      <div className="relative z-10 my-auto w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900/90 p-7 shadow-2xl backdrop-blur-xl">
         <div className="mb-6 flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-slate-400">
             <Users className="h-4 w-4 text-cyan-400" />
@@ -61,8 +73,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           </button>
         </div>
 
-        {/* Room Code */}
-        <div className="mb-6 rounded-2xl border border-cyan-500/30 bg-slate-950/80 p-5 text-center">
+        <div className="mb-5 rounded-2xl border border-cyan-500/30 bg-slate-950/80 p-5 text-center">
           <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-400">
             Código de Sala
           </p>
@@ -88,8 +99,58 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           </button>
         </div>
 
-        {/* Players List */}
-        <div className="mb-6 space-y-2.5">
+        {/* Selector de mapa */}
+        <div className="mb-5">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              Mapa
+            </span>
+            <span className="text-[11px] font-semibold text-slate-500">
+              Próximo: {THEME_META[theme]?.emoji} {THEME_META[theme]?.label}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+            <button
+              type="button"
+              onClick={() => onSelectTheme("random")}
+              className={`flex flex-col items-center gap-1 rounded-xl border px-2 py-2 text-[11px] font-bold transition ${
+                preferredTheme === "random"
+                  ? "border-white bg-slate-800/90 text-white"
+                  : "border-slate-800 bg-slate-950/60 text-slate-300 hover:border-slate-600"
+              }`}
+            >
+              <Shuffle className="h-4 w-4" />
+              Aleatorio
+            </button>
+            {THEME_ORDER.map((t) => {
+              const meta = THEME_META[t];
+              const active = preferredTheme === t;
+              return (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => onSelectTheme(t)}
+                  title={meta.desc}
+                  className={`flex flex-col items-center gap-1 rounded-xl border px-2 py-2 text-[11px] font-bold transition ${
+                    active
+                      ? "border-white bg-slate-800/90 text-white"
+                      : "border-slate-800 bg-slate-950/60 text-slate-300 hover:border-slate-600"
+                  }`}
+                >
+                  <span
+                    className="h-4 w-8 rounded border border-white/30"
+                    style={{ backgroundColor: meta.swatch }}
+                  />
+                  <span className="max-w-full truncate">
+                    {meta.emoji} {meta.label.split(" ")[0]}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="mb-5 space-y-2.5">
           {playerList.map((player) => {
             const isMe = player.id === sessionId;
             return (
@@ -122,8 +183,8 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                 <span
                   className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold ${
                     player.ready
-                      ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
-                      : "bg-slate-800 text-slate-400 border border-slate-700"
+                      ? "border border-emerald-500/30 bg-emerald-500/15 text-emerald-300"
+                      : "border border-slate-700 bg-slate-800 text-slate-400"
                   }`}
                 >
                   {player.ready ? (
@@ -140,13 +201,15 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           })}
         </div>
 
-        {/* Quick color switch in lobby */}
         {localPlayer && (
-          <div className="mb-6 flex items-center justify-between rounded-xl border border-slate-800 bg-slate-950/50 px-4 py-2.5">
-            <span className="text-xs font-semibold text-slate-400">Cambiar color:</span>
+          <div className="mb-5 flex items-center justify-between rounded-xl border border-slate-800 bg-slate-950/50 px-4 py-2.5">
+            <span className="text-xs font-semibold text-slate-400">
+              Cambiar color:
+            </span>
             <div className="flex items-center gap-2">
               {NEON_COLORS.map((c) => {
-                const active = localPlayer.color.toUpperCase() === c.hex.toUpperCase();
+                const active =
+                  localPlayer.color.toUpperCase() === c.hex.toUpperCase();
                 return (
                   <button
                     key={c.hex}
@@ -154,7 +217,9 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
                     onClick={() => onUpdateColor(c.hex)}
                     title={c.name}
                     className={`h-5 w-5 rounded-full border transition ${
-                      active ? "scale-125 border-white" : "border-white/25 opacity-70 hover:opacity-100"
+                      active
+                        ? "scale-125 border-white"
+                        : "border-white/25 opacity-70 hover:opacity-100"
                     }`}
                     style={{ backgroundColor: c.hex }}
                   />
@@ -164,7 +229,6 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
           </div>
         )}
 
-        {/* Action Buttons */}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <button
             type="button"
@@ -172,7 +236,7 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({
             className={`flex items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold transition ${
               localPlayer?.ready
                 ? "border border-emerald-400/50 bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30"
-                : "bg-cyan-500 text-slate-950 shadow-neon hover:bg-cyan-400"
+                : "bg-cyan-500 text-slate-950 hover:bg-cyan-400"
             }`}
           >
             <ShieldCheck className="h-4 w-4" />

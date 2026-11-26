@@ -1,9 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import type { PlayerState, RoundEndEvent, RoundModifier } from "@shared/types";
+import type {
+  ArenaTheme,
+  LootItemState,
+  PlayerState,
+  RoundEndEvent,
+  RoundModifier,
+} from "@shared/types";
 import {
   COLOR_STORAGE_KEY,
   NEON_COLORS,
   NICKNAME_STORAGE_KEY,
+  THEME_STORAGE_KEY,
 } from "./constants";
 import {
   colyseusClient,
@@ -23,10 +30,13 @@ function getInitialRoomParam(): string {
 
 export const App: React.FC = () => {
   const [nickname, setNickname] = useState<string>(
-    () => localStorage.getItem(NICKNAME_STORAGE_KEY) || "Cazador"
+    () => localStorage.getItem(NICKNAME_STORAGE_KEY) || "Agente"
   );
   const [selectedColor, setSelectedColor] = useState<string>(
     () => localStorage.getItem(COLOR_STORAGE_KEY) || NEON_COLORS[0].hex
+  );
+  const [selectedTheme, setSelectedTheme] = useState<string>(
+    () => localStorage.getItem(THEME_STORAGE_KEY) || "random"
   );
   const [initialRoomCode] = useState<string>(() => getInitialRoomParam());
 
@@ -39,9 +49,13 @@ export const App: React.FC = () => {
 
   const [localMode, setLocalMode] = useState(false);
   const [localModifier, setLocalModifier] = useState<RoundModifier>("normal");
+  const [localTheme, setLocalTheme] = useState<ArenaTheme>("cyber_outpost");
   const [localPlayers, setLocalPlayers] = useState<Record<string, PlayerState>>(
     {}
   );
+  const [localLootItems, setLocalLootItems] = useState<
+    Record<string, LootItemState>
+  >({});
   const localArenaRef = useRef<LocalArena | null>(null);
   const autoJoinedRef = useRef(false);
 
@@ -53,6 +67,11 @@ export const App: React.FC = () => {
   const handleColorChange = (color: string) => {
     setSelectedColor(color);
     localStorage.setItem(COLOR_STORAGE_KEY, color);
+  };
+
+  const handleThemeChange = (theme: string) => {
+    setSelectedTheme(theme);
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
   };
 
   useEffect(() => {
@@ -84,8 +103,9 @@ export const App: React.FC = () => {
     setLoading(true);
     try {
       await colyseusClient.createRoom(
-        nickname.trim() || "Cazador",
-        selectedColor
+        nickname.trim() || "Agente",
+        selectedColor,
+        selectedTheme
       );
     } catch (err) {
       setError(
@@ -104,7 +124,7 @@ export const App: React.FC = () => {
     try {
       await colyseusClient.joinRoomByCode(
         code,
-        nickname.trim() || "Cazador",
+        nickname.trim() || "Agente",
         selectedColor
       );
     } catch (err) {
@@ -129,10 +149,11 @@ export const App: React.FC = () => {
   const handleStartLocalMode = () => {
     setError(null);
     localArenaRef.current = null;
+    setLocalLootItems({});
     setLocalPlayers({
       "local-player": {
         id: "local-player",
-        name: nickname.trim() || "Cazador",
+        name: nickname.trim() || "Agente",
         x: 180,
         y: 180,
         angle: 0,
@@ -143,6 +164,8 @@ export const App: React.FC = () => {
         score: 0,
         ready: true,
         weapon: "pistol",
+        inventory: ["pistol"],
+        activeSlot: 0,
       },
     });
     setLocalMode(true);
@@ -153,6 +176,7 @@ export const App: React.FC = () => {
       localArenaRef.current = null;
       setLocalMode(false);
       setLocalPlayers({});
+      setLocalLootItems({});
       return;
     }
     await colyseusClient.leaveRoom();
@@ -161,16 +185,47 @@ export const App: React.FC = () => {
 
   const handleResetLocalArena = () => {
     if (localArenaRef.current) {
-      localArenaRef.current.resetArena();
+      localArenaRef.current.resetArena(false);
       setLocalPlayers({ ...localArenaRef.current.players });
       setLocalModifier(localArenaRef.current.modifier);
+      setLocalTheme(localArenaRef.current.theme);
+      setLocalLootItems({ ...localArenaRef.current.lootItems });
     }
   };
 
+  const handleSelectLocalTheme = useCallback((nextTheme: ArenaTheme) => {
+    if (localArenaRef.current) {
+      localArenaRef.current.setPreferredTheme(nextTheme);
+      localArenaRef.current.resetArena(true);
+      setLocalPlayers({ ...localArenaRef.current.players });
+      setLocalModifier(localArenaRef.current.modifier);
+      setLocalTheme(localArenaRef.current.theme);
+      setLocalLootItems({ ...localArenaRef.current.lootItems });
+    }
+  }, []);
+
+  const handleLocalSelectSlot = useCallback((slot: number) => {
+    if (localArenaRef.current) {
+      localArenaRef.current.selectSlot(slot);
+      setLocalPlayers({ ...localArenaRef.current.players });
+    }
+  }, []);
+
+  const handleOnlineSelectSlot = useCallback((slot: number) => {
+    colyseusClient.selectSlot(slot);
+  }, []);
+
   const handleLocalStateSync = useCallback(
-    (players: Record<string, PlayerState>, modifier: RoundModifier) => {
+    (
+      players: Record<string, PlayerState>,
+      modifier: RoundModifier,
+      theme: ArenaTheme,
+      lootItems: Record<string, LootItemState>
+    ) => {
       setLocalPlayers(players);
       setLocalModifier(modifier);
+      setLocalTheme(theme);
+      setLocalLootItems(lootItems);
     },
     []
   );
@@ -182,24 +237,30 @@ export const App: React.FC = () => {
         <GameHUD
           mode="local"
           status="playing"
+          theme={localTheme}
           modifier={localModifier}
           sessionId="local-player"
           players={localPlayers}
+          lootItems={localLootItems}
           lastRoundEnd={null}
           onLeave={() => void handleLeave()}
+          onSelectSlot={handleLocalSelectSlot}
           onResetLocalArena={handleResetLocalArena}
+          onSelectLocalTheme={handleSelectLocalTheme}
         />
         <GameCanvas
           mode="local"
           mapWidth={1600}
           mapHeight={1200}
+          theme={localTheme}
           modifier={localModifier}
           obstacles={{}}
-          lootItems={{}}
+          lootItems={localLootItems}
           players={localPlayers}
           bullets={{}}
           localSessionId="local-player"
           isPlaying={true}
+          localTheme={selectedTheme}
           localArenaRef={localArenaRef}
           onLocalStateSync={handleLocalStateSync}
         />
@@ -213,11 +274,13 @@ export const App: React.FC = () => {
       <HomeScreen
         nickname={nickname}
         selectedColor={selectedColor}
+        selectedTheme={selectedTheme}
         initialRoomCode={initialRoomCode}
         loading={loading}
         error={error}
         onNicknameChange={handleNicknameChange}
         onColorChange={handleColorChange}
+        onThemeChange={handleThemeChange}
         onCreateRoom={() => void handleCreateRoom()}
         onJoinRoom={(code) => void handleJoinRoom(code)}
         onStartLocalMode={handleStartLocalMode}
@@ -232,6 +295,9 @@ export const App: React.FC = () => {
         roomCode={snapshot.roomCode}
         sessionId={snapshot.sessionId}
         players={snapshot.players}
+        theme={snapshot.theme}
+        preferredTheme={snapshot.preferredTheme}
+        onSelectTheme={(t) => colyseusClient.selectTheme(t)}
         onToggleReady={() => colyseusClient.toggleReady()}
         onStartGame={() => colyseusClient.startGame()}
         onUpdateColor={(color) => {
@@ -250,16 +316,20 @@ export const App: React.FC = () => {
         mode="online"
         roomCode={snapshot.roomCode}
         status={snapshot.status}
+        theme={snapshot.theme}
         modifier={snapshot.modifier}
         sessionId={snapshot.sessionId}
         players={snapshot.players}
+        lootItems={snapshot.lootItems}
         lastRoundEnd={lastRoundEnd}
         onLeave={() => void handleLeave()}
+        onSelectSlot={handleOnlineSelectSlot}
       />
       <GameCanvas
         mode="online"
         mapWidth={snapshot.mapWidth}
         mapHeight={snapshot.mapHeight}
+        theme={snapshot.theme}
         modifier={snapshot.modifier}
         obstacles={snapshot.obstacles}
         lootItems={snapshot.lootItems}

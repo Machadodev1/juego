@@ -12,12 +12,15 @@ interface BulletVisual {
 
 const BULLET_STYLE: Record<
   WeaponType,
-  { color: number; radius: number; trailLen: number }
+  { color: number; core: number; radius: number; trailLen: number }
 > = {
-  pistol: { color: 0xfef08a, radius: 4.5, trailLen: 6 },
-  shotgun: { color: 0xfb923c, radius: 4, trailLen: 5 },
-  rifle: { color: 0x38bdf8, radius: 4.5, trailLen: 8 },
-  sniper: { color: 0xe879f9, radius: 5.5, trailLen: 12 },
+  pistol: { color: 0xfef08a, core: 0xffffff, radius: 4.5, trailLen: 6 },
+  smg: { color: 0xfacc15, core: 0xfffbeb, radius: 3.5, trailLen: 5 },
+  shotgun: { color: 0xfb923c, core: 0xffedd5, radius: 4, trailLen: 5 },
+  rifle: { color: 0x38bdf8, core: 0xe0f2fe, radius: 4.5, trailLen: 8 },
+  burst: { color: 0x2dd4bf, core: 0xccfbf1, radius: 4, trailLen: 9 },
+  plasma: { color: 0xf472b6, core: 0xfdf2f8, radius: 8, trailLen: 10 },
+  sniper: { color: 0xc084fc, core: 0xf3e8ff, radius: 5.5, trailLen: 13 },
 };
 
 export class BulletRenderer {
@@ -27,7 +30,7 @@ export class BulletRenderer {
   public sync(bullets: Record<string, BulletState>, dtSeconds: number): void {
     const activeIds = new Set(Object.keys(bullets));
 
-    for (const [id, visual] of this.visuals.entries()) {
+    for (const [id, visual] of Array.from(this.visuals.entries())) {
       if (!activeIds.has(id)) {
         this.container.removeChild(visual.gfx);
         visual.gfx.destroy();
@@ -75,7 +78,7 @@ export class BulletRenderer {
 
   private drawBullet(
     visual: BulletVisual,
-    style: { color: number; radius: number; trailLen: number }
+    style: { color: number; core: number; radius: number; trailLen: number }
   ): void {
     const { gfx, x, y, trail } = visual;
     gfx.clear();
@@ -88,16 +91,18 @@ export class BulletRenderer {
         .moveTo(p0.x, p0.y)
         .lineTo(p1.x, p1.y)
         .stroke({
-          width: 1.5 + progress * 3.8,
+          width: 1.5 + progress * style.radius * 0.8,
           color: style.color,
           alpha: progress * 0.55,
           cap: "round",
         });
     }
 
-    gfx.circle(x, y, style.radius + 3).fill({ color: style.color, alpha: 0.3 });
-    gfx.circle(x, y, style.radius).fill({ color: 0xffffff, alpha: 1 });
-    gfx.circle(x, y, style.radius).stroke({ width: 1.5, color: 0x0f172a, alpha: 0.85 });
+    gfx.circle(x, y, style.radius + 4).fill({ color: style.color, alpha: 0.28 });
+    gfx.circle(x, y, style.radius).fill({ color: style.core, alpha: 1 });
+    gfx
+      .circle(x, y, style.radius)
+      .stroke({ width: 1.5, color: style.color, alpha: 0.95 });
   }
 
   public clear(): void {

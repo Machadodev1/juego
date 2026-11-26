@@ -1,5 +1,6 @@
 import { Client, Room } from "colyseus.js";
 import type {
+  ArenaTheme,
   BulletHitEvent,
   BulletState,
   CrateDestroyedEvent,
@@ -11,6 +12,7 @@ import type {
   RoomStatus,
   RoundEndEvent,
   RoundModifier,
+  WeaponType,
 } from "@shared/types";
 import { SERVER_URL } from "../constants";
 
@@ -19,6 +21,8 @@ export interface TankRoomSnapshot {
   sessionId: string;
   roomCode: string;
   status: RoomStatus;
+  theme: ArenaTheme;
+  preferredTheme: string;
   modifier: RoundModifier;
   mapWidth: number;
   mapHeight: number;
@@ -35,14 +39,20 @@ interface RawMapLike<T> {
 interface RawGameRoomState {
   status?: RoomStatus;
   roomCode?: string;
+  theme?: ArenaTheme;
+  preferredTheme?: string;
   modifier?: RoundModifier;
   mapWidth?: number;
   mapHeight?: number;
-  players?: RawMapLike<PlayerState> & Record<string, PlayerState>;
+  players?: RawMapLike<RawPlayer> & Record<string, RawPlayer>;
   obstacles?: RawMapLike<ObstacleState> & Record<string, ObstacleState>;
   lootItems?: RawMapLike<LootItemState> & Record<string, LootItemState>;
   bullets?: RawMapLike<BulletState> & Record<string, BulletState>;
 }
+
+type RawPlayer = Omit<PlayerState, "inventory"> & {
+  inventory?: Iterable<string> | ArrayLike<string>;
+};
 
 type StateListener = (snapshot: TankRoomSnapshot | null) => void;
 type BulletHitListener = (event: BulletHitEvent) => void;
@@ -65,6 +75,48 @@ function mapToRecord<T extends object>(
     for (const [key, value] of Object.entries(source)) {
       if (value && typeof value === "object") {
         result[key] = { ...value };
+      }
+    }
+  }
+  return result;
+}
+
+function playersToRecord(
+  source?: RawMapLike<RawPlayer> & Record<string, RawPlayer>
+): Record<string, PlayerState> {
+  const result: Record<string, PlayerState> = {};
+  if (!source) return result;
+
+  const convert = (raw: RawPlayer): PlayerState => {
+    const inv: WeaponType[] = raw.inventory
+      ? (Array.from(raw.inventory as ArrayLike<string>) as WeaponType[])
+      : ["pistol"];
+    return {
+      id: raw.id,
+      name: raw.name,
+      x: raw.x,
+      y: raw.y,
+      angle: raw.angle,
+      color: raw.color,
+      hp: raw.hp,
+      maxHp: raw.maxHp,
+      alive: raw.alive,
+      score: raw.score,
+      ready: raw.ready,
+      weapon: raw.weapon,
+      inventory: inv.length > 0 ? inv : ["pistol"],
+      activeSlot: raw.activeSlot ?? 0,
+    };
+  };
+
+  if (typeof source.forEach === "function") {
+    source.forEach((value, key) => {
+      result[key] = convert(value);
+    });
+  } else {
+    for (const [key, value] of Object.entries(source)) {
+      if (value && typeof value === "object") {
+        result[key] = convert(value);
       }
     }
   }
@@ -95,11 +147,16 @@ class ColyseusService {
     return this.room !== null;
   }
 
-  public async createRoom(name: string, color: string): Promise<TankRoomSnapshot> {
+  public async createRoom(
+    name: string,
+    color: string,
+    theme = "random"
+  ): Promise<TankRoomSnapshot> {
     await this.leaveRoom();
     const room = await this.client.create<RawGameRoomState>("tank_room", {
       name,
       color,
+      theme,
       create: true,
     });
     return this.attachRoom(room);
@@ -137,10 +194,12 @@ class ColyseusService {
         sessionId: room.sessionId,
         roomCode: state?.roomCode || "",
         status: state?.status || "waiting",
+        theme: state?.theme || "cyber_outpost",
+        preferredTheme: state?.preferredTheme || "random",
         modifier: state?.modifier || "normal",
         mapWidth: state?.mapWidth || 1600,
         mapHeight: state?.mapHeight || 1200,
-        players: mapToRecord(state?.players),
+        players: playersToRecord(state?.players),
         obstacles: mapToRecord(state?.obstacles),
         lootItems: mapToRecord(state?.lootItems),
         bullets: mapToRecord(state?.bullets),
@@ -193,6 +252,16 @@ class ColyseusService {
   public sendInput(input: PlayerInput): void {
     if (!this.room) return;
     this.room.send("input", input);
+  }
+
+  public selectSlot(slot: number): void {
+    if (!this.room) return;
+    this.room.send("selectSlot", { slot });
+  }
+
+  public selectTheme(theme: string): void {
+    if (!this.room) return;
+    this.room.send("selectTheme", { theme });
   }
 
   public toggleReady(ready?: boolean): void {

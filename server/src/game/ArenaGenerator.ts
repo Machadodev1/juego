@@ -1,4 +1,5 @@
 import type {
+  ArenaTheme,
   LootItemState,
   ObstacleState,
   ObstacleType,
@@ -15,6 +16,7 @@ export interface SpawnPoint {
 export interface ArenaLayout {
   mapWidth: number;
   mapHeight: number;
+  theme: ArenaTheme;
   spawnPoints: SpawnPoint[];
   obstacles: ObstacleState[];
 }
@@ -27,13 +29,45 @@ interface ObstacleSpec {
   maxHp: number;
 }
 
-const OBSTACLE_SPECS: ObstacleSpec[] = [
-  { type: "rock", count: 10, radius: 38, hp: 9999, maxHp: 9999 },
-  { type: "tree", count: 12, radius: 22, hp: 9999, maxHp: 9999 },
-  { type: "crate", count: 14, radius: 28, hp: 40, maxHp: 40 },
+// Cada mapa temático tiene proporciones de cobertura distintas para variar también la táctica
+const THEME_OBSTACLE_SPECS: Record<ArenaTheme, ObstacleSpec[]> = {
+  cyber_outpost: [
+    { type: "rock", count: 10, radius: 38, hp: 9999, maxHp: 9999 },
+    { type: "tree", count: 10, radius: 22, hp: 9999, maxHp: 9999 },
+    { type: "crate", count: 15, radius: 28, hp: 40, maxHp: 40 },
+  ],
+  midnight: [
+    { type: "rock", count: 9, radius: 38, hp: 9999, maxHp: 9999 },
+    { type: "tree", count: 15, radius: 22, hp: 9999, maxHp: 9999 },
+    { type: "crate", count: 14, radius: 28, hp: 40, maxHp: 40 },
+  ],
+  arctic: [
+    { type: "rock", count: 13, radius: 38, hp: 9999, maxHp: 9999 },
+    { type: "tree", count: 9, radius: 22, hp: 9999, maxHp: 9999 },
+    { type: "crate", count: 15, radius: 28, hp: 40, maxHp: 40 },
+  ],
+  desert: [
+    { type: "rock", count: 12, radius: 40, hp: 9999, maxHp: 9999 },
+    { type: "tree", count: 7, radius: 22, hp: 9999, maxHp: 9999 },
+    { type: "crate", count: 16, radius: 28, hp: 40, maxHp: 40 },
+  ],
+};
+
+const LOOT_WEAPONS: WeaponType[] = [
+  "smg",
+  "shotgun",
+  "rifle",
+  "burst",
+  "plasma",
+  "sniper",
 ];
 
-const LOOT_WEAPONS: WeaponType[] = ["shotgun", "rifle", "sniper"];
+export const ARENA_THEMES: ArenaTheme[] = [
+  "cyber_outpost",
+  "midnight",
+  "arctic",
+  "desert",
+];
 
 const ROUND_MODIFIERS: RoundModifier[] = [
   "normal",
@@ -47,15 +81,11 @@ export class ArenaGenerator {
   public static readonly MAP_WIDTH = 1600;
   public static readonly MAP_HEIGHT = 1200;
   public static readonly SPAWN_CLEAR_RADIUS = 160;
-  public static readonly OBSTACLE_PADDING = 20;
-  public static readonly EDGE_MARGIN = 60;
+  public static readonly OBSTACLE_PADDING = 22;
+  public static readonly EDGE_MARGIN = 64;
 
   private static lootSeq = 0;
 
-  /**
-   * Devuelve los 4 puntos de aparición seguros en las esquinas de la arena (1600x1200),
-   * orientados inicialmente hacia el centro del mapa.
-   */
   public static getSpawnPoints(
     mapWidth: number = ArenaGenerator.MAP_WIDTH,
     mapHeight: number = ArenaGenerator.MAP_HEIGHT
@@ -76,19 +106,31 @@ export class ArenaGenerator {
     }));
   }
 
-  /**
-   * Genera una arena abierta estilo ZombsRoyale de 1600x1200 con rocas, árboles y cajas
-   * de botín sin superposición y respetando un radio libre de 160 px en cada spawn.
-   */
+  public static pickTheme(preferredTheme?: string, prevTheme?: ArenaTheme): ArenaTheme {
+    if (
+      preferredTheme &&
+      ARENA_THEMES.includes(preferredTheme as ArenaTheme)
+    ) {
+      return preferredTheme as ArenaTheme;
+    }
+
+    const candidates = prevTheme
+      ? ARENA_THEMES.filter((t) => t !== prevTheme)
+      : ARENA_THEMES;
+    return candidates[Math.floor(Math.random() * candidates.length)];
+  }
+
   public static generate(
     mapWidth: number = ArenaGenerator.MAP_WIDTH,
-    mapHeight: number = ArenaGenerator.MAP_HEIGHT
+    mapHeight: number = ArenaGenerator.MAP_HEIGHT,
+    theme: ArenaTheme = "cyber_outpost"
   ): ArenaLayout {
     const spawnPoints = ArenaGenerator.getSpawnPoints(mapWidth, mapHeight);
     const obstacles: ObstacleState[] = [];
+    const specs = THEME_OBSTACLE_SPECS[theme] || THEME_OBSTACLE_SPECS.cyber_outpost;
     let obstacleCounter = 0;
 
-    for (const spec of OBSTACLE_SPECS) {
+    for (const spec of specs) {
       let placed = 0;
       let attempts = 0;
       const maxAttempts = spec.count * 120;
@@ -104,7 +146,6 @@ export class ArenaGenerator {
         const x = Math.round(minX + Math.random() * (maxX - minX));
         const y = Math.round(minY + Math.random() * (maxY - minY));
 
-        // 1. Respetar radio libre de 160 px alrededor de cada punto de aparición
         let nearSpawn = false;
         for (const sp of spawnPoints) {
           const minSpawnDist = ArenaGenerator.SPAWN_CLEAR_RADIUS + spec.radius;
@@ -117,7 +158,6 @@ export class ArenaGenerator {
         }
         if (nearSpawn) continue;
 
-        // 2. Evitar superposición con otros obstáculos ya colocados
         let overlapsObstacle = false;
         for (const other of obstacles) {
           const minDist =
@@ -147,16 +187,12 @@ export class ArenaGenerator {
     return {
       mapWidth,
       mapHeight,
+      theme,
       spawnPoints,
       obstacles,
     };
   }
 
-  /**
-   * Genera un objeto de botín al destruir una caja:
-   * - 70% probabilidad de arma aleatoria ("shotgun" | "rifle" | "sniper")
-   * - 30% probabilidad de botiquín ("medkit")
-   */
   public static generateLootFromCrate(
     x: number,
     y: number,
@@ -165,7 +201,7 @@ export class ArenaGenerator {
     const id = customId ?? `loot_${++ArenaGenerator.lootSeq}_${Date.now()}`;
     const roll = Math.random();
 
-    if (roll < 0.7) {
+    if (roll < 0.74) {
       const weaponType =
         LOOT_WEAPONS[Math.floor(Math.random() * LOOT_WEAPONS.length)];
       return {
@@ -185,9 +221,20 @@ export class ArenaGenerator {
     };
   }
 
-  /**
-   * Selecciona un modificador aleatorio para la siguiente ronda.
-   */
+  public static generateWeaponDrop(
+    weaponType: WeaponType,
+    x: number,
+    y: number
+  ): LootItemState {
+    return {
+      id: `loot_${++ArenaGenerator.lootSeq}_${Date.now()}`,
+      kind: "weapon",
+      weaponType,
+      x,
+      y,
+    };
+  }
+
   public static pickRandomModifier(): RoundModifier {
     return ROUND_MODIFIERS[Math.floor(Math.random() * ROUND_MODIFIERS.length)];
   }

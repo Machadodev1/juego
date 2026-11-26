@@ -1,6 +1,15 @@
 export type RoomStatus = "waiting" | "playing" | "round_end";
 
-export type WeaponType = "pistol" | "shotgun" | "rifle" | "sniper";
+export type ArenaTheme = "cyber_outpost" | "midnight" | "arctic" | "desert";
+
+export type WeaponType =
+  | "pistol"
+  | "smg"
+  | "shotgun"
+  | "rifle"
+  | "burst"
+  | "plasma"
+  | "sniper";
 
 export type RoundModifier =
   | "normal"
@@ -17,6 +26,7 @@ export interface PlayerInput {
   angle: number;
   shoot: boolean;
   interact: boolean;
+  weaponSlot?: number;
   seq: number;
 }
 
@@ -33,6 +43,8 @@ export interface PlayerState {
   score: number;
   ready: boolean;
   weapon: WeaponType;
+  inventory: WeaponType[];
+  activeSlot: number;
 }
 
 export type ObstacleType = "tree" | "rock" | "crate";

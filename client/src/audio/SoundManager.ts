@@ -1,4 +1,5 @@
 import { Howler } from "howler";
+import type { WeaponType } from "@shared/types";
 
 class SoundManager {
   private muted = false;
@@ -63,26 +64,96 @@ class SoundManager {
     return this.muted;
   }
 
-  public playShoot(): void {
+  public playShoot(weapon: WeaponType = "pistol"): void {
     const ctx = this.getAudioContext();
     if (!ctx) return;
 
     const now = ctx.currentTime;
+
+    if (weapon === "shotgun") {
+      const noise = ctx.createBufferSource();
+      noise.buffer = this.getNoiseBuffer(ctx);
+      const filter = ctx.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.frequency.setValueAtTime(950, now);
+      filter.frequency.exponentialRampToValueAtTime(140, now + 0.18);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.24, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.19);
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(ctx.destination);
+      noise.start(now);
+      noise.stop(now + 0.19);
+      return;
+    }
+
+    if (weapon === "sniper") {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(980, now);
+      osc.frequency.exponentialRampToValueAtTime(75, now + 0.22);
+      gain.gain.setValueAtTime(0.22, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.23);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.23);
+      return;
+    }
+
+    if (weapon === "plasma") {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(320, now);
+      osc.frequency.exponentialRampToValueAtTime(880, now + 0.06);
+      osc.frequency.exponentialRampToValueAtTime(160, now + 0.18);
+      gain.gain.setValueAtTime(0.2, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.19);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.19);
+      return;
+    }
+
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
+    osc.type = weapon === "smg" ? "square" : "sawtooth";
+    const startFreq =
+      weapon === "smg" ? 660 : weapon === "burst" ? 600 : weapon === "rifle" ? 480 : 520;
+    const dur = weapon === "smg" ? 0.065 : 0.095;
 
-    osc.type = "sawtooth";
-    osc.frequency.setValueAtTime(520, now);
-    osc.frequency.exponentialRampToValueAtTime(110, now + 0.09);
+    osc.frequency.setValueAtTime(startFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(120, now + dur);
 
-    gain.gain.setValueAtTime(0.14, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+    gain.gain.setValueAtTime(weapon === "smg" ? 0.1 : 0.14, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur + 0.01);
 
     osc.connect(gain);
     gain.connect(ctx.destination);
 
     osc.start(now);
-    osc.stop(now + 0.1);
+    osc.stop(now + dur + 0.01);
+  }
+
+  public playSwitchWeapon(): void {
+    const ctx = this.getAudioContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(420, now);
+    osc.frequency.setValueAtTime(620, now + 0.035);
+    gain.gain.setValueAtTime(0.09, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.08);
   }
 
   public playHit(): void {

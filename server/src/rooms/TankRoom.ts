@@ -1,5 +1,7 @@
 import { Client, Delayed, Room } from "colyseus";
+import { ArraySchema } from "@colyseus/schema";
 import type {
+  ArenaTheme,
   BulletHitEvent,
   CrateDestroyedEvent,
   LootItemState,
@@ -15,13 +17,14 @@ import {
   ObstacleSchema,
   PlayerSchema,
 } from "./schema/GameRoomState";
-import { ArenaGenerator } from "../game/ArenaGenerator";
+import { ARENA_THEMES, ArenaGenerator } from "../game/ArenaGenerator";
 import { PhysicsEngine } from "../game/PhysicsEngine";
 
 interface JoinOptions {
   name?: string;
   color?: string;
   roomCode?: string;
+  theme?: string;
   create?: boolean;
 }
 
@@ -34,13 +37,21 @@ interface ReadyPayload {
   ready?: boolean;
 }
 
+interface SelectThemePayload {
+  theme?: string;
+}
+
+interface SelectSlotPayload {
+  slot?: number;
+}
+
 const DEFAULT_COLORS = [
-  "#22D3EE", // Cian
-  "#EC4899", // Magenta
-  "#A3E635", // Lima
-  "#F59E0B", // Ámbar
-  "#8B5CF6", // Violeta
-  "#EF4444", // Rojo
+  "#22D3EE",
+  "#EC4899",
+  "#A3E635",
+  "#F59E0B",
+  "#8B5CF6",
+  "#EF4444",
 ];
 
 const WINNING_SCORE = 5;
@@ -55,6 +66,7 @@ export class TankRoom extends Room<GameRoomState> {
   private playerInputs: Map<string, PlayerInput> = new Map();
   private shootLatched: Map<string, boolean> = new Map();
   private interactLatched: Map<string, boolean> = new Map();
+  private slotLatched: Map<string, number | undefined> = new Map();
   private roundTransitionTimer: Delayed | null = null;
   private roundEndingScheduled: boolean = false;
 
@@ -71,13 +83,19 @@ export class TankRoom extends Room<GameRoomState> {
 
     this.state.roomCode = requestedCode;
     this.state.status = "waiting";
+    this.state.preferredTheme =
+      options?.theme &&
+      (options.theme === "random" ||
+        ARENA_THEMES.includes(options.theme as ArenaTheme))
+        ? options.theme
+        : "random";
+    this.state.theme = ArenaGenerator.pickTheme(this.state.preferredTheme);
     this.state.modifier = "normal";
     this.state.mapWidth = ArenaGenerator.MAP_WIDTH;
     this.state.mapHeight = ArenaGenerator.MAP_HEIGHT;
 
     TankRoom.activeRoomCodes.add(requestedCode);
 
-    // Registrar roomCode en el RoomListing de Colyseus para que filterBy(["roomCode"]) funcione al unirse
     options.roomCode = requestedCode;
     if (this.listing) {
       (this.listing as unknown as Record<string, unknown>).roomCode = requestedCode;
@@ -99,6 +117,9 @@ export class TankRoom extends Room<GameRoomState> {
         this.addLootToState(spawnedLoot);
         this.broadcast("crateDestroyed", event);
       },
+      onLootSpawned: (loot: LootItemState) => {
+        this.addLootToState(loot);
+      },
       onPlayerDamaged: (playerId: string, hp: number) => {
         const player = this.state.players.get(playerId);
         if (player) {
@@ -111,9 +132,16 @@ export class TankRoom extends Room<GameRoomState> {
           player.hp = hp;
         }
       },
-      onPlayerWeaponChanged: (playerId: string, weapon: WeaponType) => {
+      onPlayerInventoryUpdated: (
+        playerId: string,
+        inventory: WeaponType[],
+        activeSlot: number,
+        weapon: WeaponType
+      ) => {
         const player = this.state.players.get(playerId);
         if (player) {
+          player.inventory = new ArraySchema<string>(...inventory);
+          player.activeSlot = activeSlot;
           player.weapon = weapon;
         }
       },
@@ -134,9 +162,7 @@ export class TankRoom extends Room<GameRoomState> {
       },
     });
 
-    // Generar una arena inicial para previsualización / primera partida
-    this.generateAndLoadArena();
-
+    this.generateAndLoadArena(this.state.theme);
     this.registerMessageHandlers();
 
     this.setPatchRate(1000 / TICK_RATE_HZ);
@@ -166,10 +192,13 @@ export class TankRoom extends Room<GameRoomState> {
     player.score = 0;
     player.ready = false;
     player.weapon = "pistol";
+    player.inventory = new ArraySchema<string>("pistol");
+    player.activeSlot = 0;
 
     this.state.players.set(client.sessionId, player);
     this.shootLatched.set(client.sessionId, false);
     this.interactLatched.set(client.sessionId, false);
+    this.slotLatched.set(client.sessionId, undefined);
     this.playerInputs.set(client.sessionId, {
       up: false,
       down: false,
@@ -187,6 +216,7 @@ export class TankRoom extends Room<GameRoomState> {
     this.playerInputs.delete(client.sessionId);
     this.shootLatched.delete(client.sessionId);
     this.interactLatched.delete(client.sessionId);
+    this.slotLatched.delete(client.sessionId);
     this.state.players.delete(client.sessionId);
 
     if (this.state.status === "playing") {
@@ -211,7 +241,6 @@ export class TankRoom extends Room<GameRoomState> {
   }
 
   private registerMessageHandlers(): void {
-    // 1. "updateProfile": actualiza name y color mientras status === "waiting"
     this.onMessage("updateProfile", (client, payload: ProfileUpdatePayload) => {
       if (this.state.status !== "waiting") return;
       const player = this.state.players.get(client.sessionId);
@@ -225,7 +254,26 @@ export class TankRoom extends Room<GameRoomState> {
       }
     });
 
-    // 2. "ready": alterna player.ready en "waiting" e inicia cuando >= 2 jugadores están listos
+    this.onMessage("selectTheme", (_client, payload: SelectThemePayload) => {
+      if (this.state.status !== "waiting" || !payload?.theme) return;
+      if (
+        payload.theme === "random" ||
+        ARENA_THEMES.includes(payload.theme as ArenaTheme)
+      ) {
+        this.state.preferredTheme = payload.theme;
+        if (payload.theme !== "random") {
+          this.state.theme = payload.theme as ArenaTheme;
+        }
+      }
+    });
+
+    this.onMessage("selectSlot", (client, payload: SelectSlotPayload) => {
+      if (this.state.status !== "playing") return;
+      if (typeof payload?.slot === "number" && Number.isInteger(payload.slot)) {
+        this.physics.selectWeaponSlot(client.sessionId, payload.slot);
+      }
+    });
+
     this.onMessage("ready", (client, payload?: ReadyPayload | boolean) => {
       if (this.state.status !== "waiting") return;
       const player = this.state.players.get(client.sessionId);
@@ -242,7 +290,6 @@ export class TankRoom extends Room<GameRoomState> {
       this.checkAutoStart();
     });
 
-    // Soporte opcional de inicio directo ("startGame") cuando hay >= 2 jugadores
     this.onMessage("startGame", (client) => {
       if (this.state.status !== "waiting") return;
       if (this.state.players.size < 2) return;
@@ -251,7 +298,6 @@ export class TankRoom extends Room<GameRoomState> {
       this.startMatch();
     });
 
-    // 3. "input": guarda el último PlayerInput para aplicarlo en el ciclo físico a 60 Hz
     const handleInput = (client: Client, input: PlayerInput) => {
       if (this.state.status !== "playing" || !input) return;
       const player = this.state.players.get(client.sessionId);
@@ -265,6 +311,12 @@ export class TankRoom extends Room<GameRoomState> {
       }
       if (interactPressed) {
         this.interactLatched.set(client.sessionId, true);
+      }
+      if (
+        typeof input.weaponSlot === "number" &&
+        Number.isInteger(input.weaponSlot)
+      ) {
+        this.slotLatched.set(client.sessionId, input.weaponSlot);
       }
 
       const prevInput = this.playerInputs.get(client.sessionId);
@@ -281,6 +333,7 @@ export class TankRoom extends Room<GameRoomState> {
         angle: nextAngle,
         shoot: shootPressed,
         interact: interactPressed,
+        weaponSlot: input.weaponSlot,
         seq: typeof input.seq === "number" ? input.seq : 0,
       });
     };
@@ -320,14 +373,18 @@ export class TankRoom extends Room<GameRoomState> {
     this.roundEndingScheduled = false;
 
     const nextModifier = ArenaGenerator.pickRandomModifier();
+    const nextTheme = ArenaGenerator.pickTheme(
+      this.state.preferredTheme,
+      this.state.theme
+    );
 
     this.state.modifier = nextModifier;
+    this.state.theme = nextTheme;
     this.physics.setModifier(nextModifier);
 
-    const arena = this.generateAndLoadArena();
+    const arena = this.generateAndLoadArena(nextTheme);
     const playerIds = Array.from(this.state.players.keys());
 
-    // Barajar los 4 puntos de aparición para que las esquinas roten de forma justa cada ronda
     const shuffledSpawns = [...arena.spawnPoints];
     for (let i = shuffledSpawns.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -349,9 +406,12 @@ export class TankRoom extends Room<GameRoomState> {
       player.maxHp = PhysicsEngine.PLAYER_MAX_HP;
       player.alive = true;
       player.weapon = "pistol";
+      player.inventory = new ArraySchema<string>("pistol");
+      player.activeSlot = 0;
 
       this.shootLatched.set(id, false);
       this.interactLatched.set(id, false);
+      this.slotLatched.set(id, undefined);
       this.playerInputs.set(id, {
         up: false,
         down: false,
@@ -369,10 +429,11 @@ export class TankRoom extends Room<GameRoomState> {
     this.state.status = "playing";
   }
 
-  private generateAndLoadArena() {
+  private generateAndLoadArena(theme: ArenaTheme) {
     const arena = ArenaGenerator.generate(
       ArenaGenerator.MAP_WIDTH,
-      ArenaGenerator.MAP_HEIGHT
+      ArenaGenerator.MAP_HEIGHT,
+      theme
     );
 
     this.state.mapWidth = arena.mapWidth;
@@ -414,7 +475,6 @@ export class TankRoom extends Room<GameRoomState> {
 
     const now = Date.now();
 
-    // 1. Aplicar inputs de jugadores vivos y registrar proyectiles disparados
     for (const [playerId, player] of this.state.players.entries()) {
       if (!player.alive) continue;
       const input = this.playerInputs.get(playerId);
@@ -422,13 +482,17 @@ export class TankRoom extends Room<GameRoomState> {
 
       const latchedShoot = Boolean(this.shootLatched.get(playerId));
       const latchedInteract = Boolean(this.interactLatched.get(playerId));
+      const latchedSlot = this.slotLatched.get(playerId);
       this.shootLatched.set(playerId, false);
       this.interactLatched.set(playerId, false);
+      this.slotLatched.set(playerId, undefined);
 
       const effectiveInput: PlayerInput = {
         ...input,
         shoot: input.shoot || latchedShoot,
         interact: input.interact || latchedInteract,
+        weaponSlot:
+          latchedSlot !== undefined ? latchedSlot : input.weaponSlot,
       };
 
       const spawnedBullets = this.physics.applyPlayerInput(
@@ -450,10 +514,8 @@ export class TankRoom extends Room<GameRoomState> {
       }
     }
 
-    // 2. Avanzar paso de simulación Matter.js
     this.physics.update(deltaTime);
 
-    // 3. Sincronizar estado autoritativo de los jugadores
     for (const [playerId, player] of this.state.players.entries()) {
       const snap = this.physics.getPlayerSnapshot(playerId);
       if (snap) {
@@ -464,10 +526,10 @@ export class TankRoom extends Room<GameRoomState> {
         player.maxHp = snap.maxHp;
         player.alive = snap.alive;
         player.weapon = snap.weapon;
+        player.activeSlot = snap.activeSlot;
       }
     }
 
-    // 4. Sincronizar estado autoritativo de los proyectiles activos
     const activeBullets = this.physics.getActiveBullets();
     for (const b of activeBullets) {
       let schema = this.state.bullets.get(b.id);
@@ -484,7 +546,6 @@ export class TankRoom extends Room<GameRoomState> {
       schema.vy = b.vy;
     }
 
-    // 5. Verificar condición de fin de ronda por si la última baja ocurrió en este tick
     this.checkRoundEndCondition();
   }
 
@@ -531,7 +592,6 @@ export class TankRoom extends Room<GameRoomState> {
     };
     this.broadcast("roundEnd", roundEndEvent);
 
-    // Tras 3.5 segundos genera nueva arena, nuevo modificador aleatorio y revive a todos (reiniciando marcadores si alguien llegó a 5)
     this.roundTransitionTimer = this.clock.setTimeout(() => {
       if (championReached) {
         for (const player of this.state.players.values()) {
@@ -556,7 +616,7 @@ export class TankRoom extends Room<GameRoomState> {
     this.roundEndingScheduled = false;
     this.state.status = "waiting";
     this.state.modifier = "normal";
-    this.generateAndLoadArena();
+    this.generateAndLoadArena(this.state.theme);
 
     if (this.clients.length < this.maxClients) {
       void this.unlock();
@@ -575,6 +635,8 @@ export class TankRoom extends Room<GameRoomState> {
       player.hp = PhysicsEngine.PLAYER_MAX_HP;
       player.maxHp = PhysicsEngine.PLAYER_MAX_HP;
       player.weapon = "pistol";
+      player.inventory = new ArraySchema<string>("pistol");
+      player.activeSlot = 0;
       player.x = sp.x;
       player.y = sp.y;
       player.angle = sp.angle;
@@ -606,7 +668,7 @@ export class TankRoom extends Room<GameRoomState> {
         return cleaned;
       }
     }
-    return `Jugador ${fallbackNumber}`;
+    return `Agente ${fallbackNumber}`;
   }
 
   private sanitizeColor(rawColor: string | undefined, index: number): string {

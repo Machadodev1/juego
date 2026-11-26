@@ -19,10 +19,16 @@ export interface PhysicsCallbacks {
   onObstacleDamaged?: (obstacleId: string, hp: number) => void;
   onPlayerDamaged?: (playerId: string, hp: number) => void;
   onPlayerHealed?: (playerId: string, hp: number) => void;
-  onPlayerWeaponChanged?: (playerId: string, weapon: WeaponType) => void;
+  onPlayerInventoryUpdated?: (
+    playerId: string,
+    inventory: WeaponType[],
+    activeSlot: number,
+    weapon: WeaponType
+  ) => void;
   onPlayerEliminated?: (event: PlayerEliminatedEvent) => void;
   onBulletRemoved?: (bulletId: string) => void;
   onLootPickedUp?: (lootId: string, playerId: string) => void;
+  onLootSpawned?: (loot: LootItemState) => void;
 }
 
 interface InternalPlayer {
@@ -33,8 +39,11 @@ interface InternalPlayer {
   maxHp: number;
   alive: boolean;
   weapon: WeaponType;
+  inventory: WeaponType[];
+  activeSlot: number;
   lastShootTime: number;
-  interactPressed: boolean;
+  wasInteracting: boolean;
+  interactTriggered: boolean;
 }
 
 interface InternalObstacle {
@@ -53,6 +62,7 @@ interface InternalBullet {
   maxRangePx: number;
   distanceTraveled: number;
   bounces: number;
+  maxBounces: number;
   prevX: number;
   prevY: number;
 }
@@ -65,17 +75,18 @@ const CATEGORY_BULLET = 0x0008;
 export class PhysicsEngine {
   public static readonly TICKS_PER_SECOND = 60;
   public static readonly SUBSTEPS = 2;
+  public static readonly MAX_INVENTORY_SLOTS = 3;
 
   public static readonly PLAYER_RADIUS = 22;
   public static readonly PLAYER_MAX_HP = 100;
-  public static readonly PLAYER_BASE_SPEED_PX_S = 260;
+  public static readonly PLAYER_BASE_SPEED_PX_S = 265;
   public static readonly SPEED_BOOST_MULTIPLIER = 1.4;
 
   public static readonly BULLET_RADIUS = 5;
-  public static readonly MAX_RICOCHET_BOUNCES = 2;
+  public static readonly RICOCHET_BOUNCES = 2;
 
-  public static readonly LOOT_AUTO_PICKUP_RADIUS = 42;
-  public static readonly LOOT_INTERACT_RADIUS = 52;
+  public static readonly MEDKIT_AUTO_RADIUS = 38;
+  public static readonly LOOT_INTERACT_RADIUS = 58;
   public static readonly MEDKIT_HEAL_AMOUNT = 35;
   public static readonly VAMPIRE_HEAL_AMOUNT = 25;
 
@@ -106,7 +117,6 @@ export class PhysicsEngine {
 
   constructor(callbacks: PhysicsCallbacks = {}) {
     this.callbacks = callbacks;
-    // Asegurar rebotes elásticos exactos incluso en ángulos rasantes para el modificador "ricochet"
     (Matter.Resolver as unknown as { _restingThresh: number })._restingThresh = 0.001;
     this.engine = Matter.Engine.create({
       gravity: { x: 0, y: 0, scale: 0 },
@@ -123,10 +133,6 @@ export class PhysicsEngine {
     return this.modifier;
   }
 
-  /**
-   * Construye los 4 muros estáticos invisibles de los bordes del mapa y los
-   * cuerpos circulares estáticos de todos los obstáculos de la arena.
-   */
   public loadArena(
     mapWidth: number,
     mapHeight: number,
@@ -155,7 +161,6 @@ export class PhysicsEngine {
     };
 
     this.borderWalls = [
-      // Arriba
       Matter.Bodies.rectangle(
         mapWidth / 2,
         -halfT,
@@ -163,7 +168,6 @@ export class PhysicsEngine {
         wallThickness,
         borderWallOptions
       ),
-      // Abajo
       Matter.Bodies.rectangle(
         mapWidth / 2,
         mapHeight + halfT,
@@ -171,7 +175,6 @@ export class PhysicsEngine {
         wallThickness,
         borderWallOptions
       ),
-      // Izquierda
       Matter.Bodies.rectangle(
         -halfT,
         mapHeight / 2,
@@ -179,7 +182,6 @@ export class PhysicsEngine {
         mapHeight + wallThickness * 2,
         borderWallOptions
       ),
-      // Derecha
       Matter.Bodies.rectangle(
         mapWidth + halfT,
         mapHeight / 2,
@@ -213,9 +215,6 @@ export class PhysicsEngine {
     }
   }
 
-  /**
-   * Crea o reposiciona el cuerpo circular de un jugador con 100 HP y pistola inicial.
-   */
   public spawnPlayer(
     id: string,
     x: number,
@@ -248,8 +247,11 @@ export class PhysicsEngine {
       maxHp: PhysicsEngine.PLAYER_MAX_HP,
       alive: true,
       weapon,
+      inventory: [weapon],
+      activeSlot: 0,
       lastShootTime: -Infinity,
-      interactPressed: false,
+      wasInteracting: false,
+      interactTriggered: false,
     });
   }
 
@@ -261,12 +263,25 @@ export class PhysicsEngine {
     }
   }
 
-  /**
-   * Aplica el PlayerInput de un jugador:
-   * - Movimiento lineal normalizado en 8 direcciones (+1.4x en "speed_boost")
-   * - Rotación de apuntado directa (`angle`)
-   * - Disparo respetando cooldown, cantidad de perdigones y dispersión del arma actual
-   */
+  public selectWeaponSlot(playerId: string, slot: number): boolean {
+    const player = this.players.get(playerId);
+    if (!player || !player.alive) return false;
+    if (slot < 0 || slot >= player.inventory.length) return false;
+    if (player.activeSlot === slot && player.weapon === player.inventory[slot]) {
+      return false;
+    }
+
+    player.activeSlot = slot;
+    player.weapon = player.inventory[slot];
+    this.callbacks.onPlayerInventoryUpdated?.(
+      player.id,
+      [...player.inventory],
+      player.activeSlot,
+      player.weapon
+    );
+    return true;
+  }
+
   public applyPlayerInput(
     playerId: string,
     input: PlayerInput,
@@ -277,12 +292,20 @@ export class PhysicsEngine {
       return [];
     }
 
-    // 1. Actualizar ángulo de apuntado
+    // 1. Cambio de ranura de arma si viene en el input
+    if (
+      typeof input.weaponSlot === "number" &&
+      Number.isInteger(input.weaponSlot)
+    ) {
+      this.selectWeaponSlot(playerId, input.weaponSlot);
+    }
+
+    // 2. Actualizar ángulo de apuntado
     if (typeof input.angle === "number" && Number.isFinite(input.angle)) {
       player.angle = Math.atan2(Math.sin(input.angle), Math.cos(input.angle));
     }
 
-    // 2. Velocidad lineal normalizada en 8 direcciones
+    // 3. Movimiento lineal normalizado en 8 direcciones
     let moveX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
     let moveY = (input.down ? 1 : 0) - (input.up ? 1 : 0);
 
@@ -304,9 +327,14 @@ export class PhysicsEngine {
     });
     Matter.Body.setAngularVelocity(player.body, 0);
 
-    player.interactPressed = Boolean(input.interact);
+    // 4. Detección por flanco (edge-trigger) de la tecla E (interact)
+    const curInteract = Boolean(input.interact);
+    if (curInteract && !player.wasInteracting) {
+      player.interactTriggered = true;
+    }
+    player.wasInteracting = curInteract;
 
-    // 3. Disparo según configuración del arma equipada
+    // 5. Disparo según configuración del arma activa
     const spawnedBullets: BulletState[] = [];
     const weaponStats = WEAPON_CONFIGS[player.weapon];
 
@@ -327,14 +355,18 @@ export class PhysicsEngine {
     const results: BulletState[] = [];
     const spreadRad = (stats.spreadDeg * Math.PI) / 180;
     const stepSpeed = stats.speedPxPerSec / PhysicsEngine.TICKS_PER_SECOND;
-    const muzzleDist =
-      PhysicsEngine.PLAYER_RADIUS + PhysicsEngine.BULLET_RADIUS + 4;
+    const bulletRadius =
+      stats.type === "plasma" ? 8 : PhysicsEngine.BULLET_RADIUS;
+    const muzzleDist = PhysicsEngine.PLAYER_RADIUS + bulletRadius + 4;
+    const extraRicochet =
+      this.modifier === "ricochet" ? PhysicsEngine.RICOCHET_BOUNCES : 0;
+    const maxBounces = (stats.naturalBounces ?? 0) + extraRicochet;
 
     for (let i = 0; i < stats.projectiles; i++) {
       let shotAngle = player.angle;
 
       if (stats.projectiles > 1 && stats.fanSpread) {
-        const t = i / (stats.projectiles - 1) - 0.5; // [-0.5, +0.5]
+        const t = i / (stats.projectiles - 1) - 0.5;
         shotAngle += t * spreadRad;
       } else if (spreadRad > 0) {
         shotAngle += (Math.random() - 0.5) * spreadRad;
@@ -343,7 +375,6 @@ export class PhysicsEngine {
       const cos = Math.cos(shotAngle);
       const sin = Math.sin(shotAngle);
 
-      // Evitar que el cañón atraviese muros/obstáculos si el jugador dispara pegado a ellos
       const desiredX = player.body.position.x + cos * muzzleDist;
       const desiredY = player.body.position.y + sin * muzzleDist;
 
@@ -355,21 +386,21 @@ export class PhysicsEngine {
         staticBodies,
         player.body.position,
         { x: desiredX, y: desiredY },
-        PhysicsEngine.BULLET_RADIUS * 2
+        bulletRadius * 2
       );
 
       const actualOffset = rayHits.length > 0 ? 6 : muzzleDist;
       const spawnX = Math.max(
-        PhysicsEngine.BULLET_RADIUS + 1,
+        bulletRadius + 1,
         Math.min(
-          this.mapWidth - PhysicsEngine.BULLET_RADIUS - 1,
+          this.mapWidth - bulletRadius - 1,
           player.body.position.x + cos * actualOffset
         )
       );
       const spawnY = Math.max(
-        PhysicsEngine.BULLET_RADIUS + 1,
+        bulletRadius + 1,
         Math.min(
-          this.mapHeight - PhysicsEngine.BULLET_RADIUS - 1,
+          this.mapHeight - bulletRadius - 1,
           player.body.position.y + sin * actualOffset
         )
       );
@@ -380,24 +411,19 @@ export class PhysicsEngine {
       const vyPxSec = sin * stats.speedPxPerSec;
 
       const bulletId = `b_${++this.bulletSeq}_${now}`;
-      const body = Matter.Bodies.circle(
-        spawnX,
-        spawnY,
-        PhysicsEngine.BULLET_RADIUS,
-        {
-          label: `bullet:${bulletId}`,
-          restitution: 1,
-          friction: 0,
-          frictionStatic: 0,
-          frictionAir: 0,
-          inertia: Infinity,
-          slop: 0,
-          collisionFilter: {
-            category: CATEGORY_BULLET,
-            mask: CATEGORY_WALL | CATEGORY_OBSTACLE,
-          },
-        }
-      );
+      const body = Matter.Bodies.circle(spawnX, spawnY, bulletRadius, {
+        label: `bullet:${bulletId}`,
+        restitution: 1,
+        friction: 0,
+        frictionStatic: 0,
+        frictionAir: 0,
+        inertia: Infinity,
+        slop: 0,
+        collisionFilter: {
+          category: CATEGORY_BULLET,
+          mask: CATEGORY_WALL | CATEGORY_OBSTACLE,
+        },
+      });
 
       Matter.Body.setVelocity(body, { x: vxStep, y: vyStep });
       Matter.Composite.add(this.world, body);
@@ -413,6 +439,7 @@ export class PhysicsEngine {
         maxRangePx: stats.maxRangePx,
         distanceTraveled: 0,
         bounces: 0,
+        maxBounces,
         prevX: spawnX,
         prevY: spawnY,
       });
@@ -431,10 +458,6 @@ export class PhysicsEngine {
     return results;
   }
 
-  /**
-   * Ejecuta un paso de simulación a 60 Hz con sub-stepping para precisión continua
-   * en proyectiles rápidos (p. ej. sniper a 1350 px/s).
-   */
   public update(deltaMs: number = 1000 / 60): void {
     const clampedDelta = Math.min(deltaMs, 1000 / PhysicsEngine.TICKS_PER_SECOND);
     const subDelta = clampedDelta / PhysicsEngine.SUBSTEPS;
@@ -447,13 +470,9 @@ export class PhysicsEngine {
 
       Matter.Engine.update(this.engine, subDelta);
 
-      // 1. Procesar impactos contra muros/troncos/rocas y cajas registrados en Matter.js
       this.flushEnvironmentHits();
-
-      // 2. Detección continua (segmento-círculo) de balas contra jugadores enemigos vivos
       this.checkBulletPlayerHits();
 
-      // 3. Actualizar distancia recorrida, alcance máximo y normalización de velocidad tras rebote
       for (const [bulletId, bullet] of this.bullets.entries()) {
         if (this.bulletsToDestroy.has(bulletId)) continue;
 
@@ -469,7 +488,6 @@ export class PhysicsEngine {
         this.normalizeBulletVelocity(bullet);
       }
 
-      // 4. Limpiar balas destruidas en este sub-step
       if (this.bulletsToDestroy.size > 0) {
         for (const bulletId of this.bulletsToDestroy) {
           this.removeBullet(bulletId);
@@ -478,11 +496,10 @@ export class PhysicsEngine {
       }
     }
 
-    // 5. Recolección de botín (< 42 px automático o <= 52 px con interact)
     this.checkLootPickups();
 
-    // 6. Mantener velocidad angular 0 en los jugadores vivos
     for (const player of this.players.values()) {
+      player.interactTriggered = false;
       if (player.alive) {
         Matter.Body.setAngularVelocity(player.body, 0);
       }
@@ -531,12 +548,14 @@ export class PhysicsEngine {
   }
 
   private checkBulletPlayerHits(): void {
-    const hitRadius = PhysicsEngine.PLAYER_RADIUS + PhysicsEngine.BULLET_RADIUS;
-    const hitRadiusSq = hitRadius * hitRadius;
     const damageMultiplier = this.modifier === "double_damage" ? 2 : 1;
 
     for (const [bulletId, bullet] of this.bullets.entries()) {
       if (this.bulletsToDestroy.has(bulletId)) continue;
+
+      const bRad = bullet.weaponType === "plasma" ? 8 : PhysicsEngine.BULLET_RADIUS;
+      const hitRadius = PhysicsEngine.PLAYER_RADIUS + bRad;
+      const hitRadiusSq = hitRadius * hitRadius;
 
       const x1 = bullet.prevX;
       const y1 = bullet.prevY;
@@ -572,7 +591,6 @@ export class PhysicsEngine {
             const elimY = victim.body.position.y;
             Matter.Composite.remove(this.world, victim.body);
 
-            // Modificador "vampire": cura +25 HP al atacante sin superar maxHp (100)
             if (this.modifier === "vampire") {
               const killer = this.players.get(bullet.ownerId);
               if (killer && killer.alive) {
@@ -598,45 +616,107 @@ export class PhysicsEngine {
     }
   }
 
+  /**
+   * Recolección de botín:
+   * - Armas ("weapon"): REQUIEREN presionar la tecla E (`interactTriggered`) dentro de 58 px.
+   *   Agregan al inventario (hasta 3 ranuras) o reemplazan la ranura activa soltando el arma previa.
+   * - Botiquines ("medkit"): Se recogen con E (<= 58 px) o al pasar encima (< 38 px) si falta salud.
+   */
   private checkLootPickups(): void {
     if (this.lootItems.size === 0) return;
 
-    const autoRadiusSq =
-      PhysicsEngine.LOOT_AUTO_PICKUP_RADIUS *
-      PhysicsEngine.LOOT_AUTO_PICKUP_RADIUS;
-    const interactRadiusSq =
-      PhysicsEngine.LOOT_INTERACT_RADIUS *
-      PhysicsEngine.LOOT_INTERACT_RADIUS;
+    const interactSq =
+      PhysicsEngine.LOOT_INTERACT_RADIUS * PhysicsEngine.LOOT_INTERACT_RADIUS;
+    const medkitAutoSq =
+      PhysicsEngine.MEDKIT_AUTO_RADIUS * PhysicsEngine.MEDKIT_AUTO_RADIUS;
 
-    for (const [lootId, loot] of Array.from(this.lootItems.entries())) {
-      for (const player of this.players.values()) {
-        if (!player.alive) continue;
+    for (const player of this.players.values()) {
+      if (!player.alive) continue;
 
-        const dx = player.body.position.x - loot.x;
-        const dy = player.body.position.y - loot.y;
-        const distSq = dx * dx + dy * dy;
+      const px = player.body.position.x;
+      const py = player.body.position.y;
 
-        const thresholdSq = player.interactPressed
-          ? interactRadiusSq
-          : autoRadiusSq;
+      // 1. Si el jugador presionó E en este tick, recoger el botín más cercano en rango
+      if (player.interactTriggered) {
+        let closestLoot: LootItemState | null = null;
+        let closestDistSq = interactSq;
 
-        if (distSq < thresholdSq) {
-          if (loot.kind === "medkit") {
-            player.hp = Math.min(
-              player.maxHp,
-              player.hp + PhysicsEngine.MEDKIT_HEAL_AMOUNT
-            );
-            this.callbacks.onPlayerHealed?.(player.id, player.hp);
-          } else if (loot.kind === "weapon" && loot.weaponType) {
-            player.weapon = loot.weaponType;
-            this.callbacks.onPlayerWeaponChanged?.(player.id, loot.weaponType);
+        for (const loot of this.lootItems.values()) {
+          const dSq = (px - loot.x) ** 2 + (py - loot.y) ** 2;
+          if (dSq <= closestDistSq) {
+            closestDistSq = dSq;
+            closestLoot = loot;
           }
+        }
 
-          this.lootItems.delete(lootId);
-          this.callbacks.onLootPickedUp?.(lootId, player.id);
-          break;
+        if (closestLoot) {
+          this.consumeLootItem(player, closestLoot);
+          continue;
         }
       }
+
+      // 2. Botiquines: curación automática al pasar encima solo si el jugador está herido
+      if (player.hp < player.maxHp) {
+        for (const loot of Array.from(this.lootItems.values())) {
+          if (loot.kind !== "medkit") continue;
+          const dSq = (px - loot.x) ** 2 + (py - loot.y) ** 2;
+          if (dSq < medkitAutoSq) {
+            this.consumeLootItem(player, loot);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  private consumeLootItem(player: InternalPlayer, loot: LootItemState): void {
+    this.lootItems.delete(loot.id);
+    this.callbacks.onLootPickedUp?.(loot.id, player.id);
+
+    if (loot.kind === "medkit") {
+      player.hp = Math.min(
+        player.maxHp,
+        player.hp + PhysicsEngine.MEDKIT_HEAL_AMOUNT
+      );
+      this.callbacks.onPlayerHealed?.(player.id, player.hp);
+      return;
+    }
+
+    if (loot.kind === "weapon" && loot.weaponType) {
+      const picked = loot.weaponType;
+      const existingIdx = player.inventory.indexOf(picked);
+
+      if (existingIdx !== -1) {
+        player.activeSlot = existingIdx;
+        player.weapon = picked;
+      } else if (player.inventory.length < PhysicsEngine.MAX_INVENTORY_SLOTS) {
+        player.inventory.push(picked);
+        player.activeSlot = player.inventory.length - 1;
+        player.weapon = picked;
+      } else {
+        // Reemplazar el arma de la ranura activa (si es la pistola base en slot 0 y prefiere conservar o cambiar, cambia la ranura activa y suelta el arma anterior al suelo)
+        const replaceIdx = player.activeSlot;
+        const droppedWeapon = player.inventory[replaceIdx];
+        player.inventory[replaceIdx] = picked;
+        player.weapon = picked;
+
+        if (droppedWeapon && droppedWeapon !== picked) {
+          const droppedLoot = ArenaGenerator.generateWeaponDrop(
+            droppedWeapon,
+            loot.x,
+            loot.y
+          );
+          this.lootItems.set(droppedLoot.id, droppedLoot);
+          this.callbacks.onLootSpawned?.(droppedLoot);
+        }
+      }
+
+      this.callbacks.onPlayerInventoryUpdated?.(
+        player.id,
+        [...player.inventory],
+        player.activeSlot,
+        player.weapon
+      );
     }
   }
 
@@ -683,10 +763,7 @@ export class PhysicsEngine {
         const hitY = bulletBody.position.y;
 
         if (otherBody.label === "border_wall") {
-          if (
-            this.modifier === "ricochet" &&
-            bullet.bounces < PhysicsEngine.MAX_RICOCHET_BOUNCES
-          ) {
+          if (bullet.bounces < bullet.maxBounces) {
             bullet.bounces += 1;
           } else {
             this.bulletsToDestroy.add(bulletId);
@@ -701,10 +778,7 @@ export class PhysicsEngine {
           if (!obs) continue;
 
           if (obs.state.type === "rock") {
-            if (
-              this.modifier === "ricochet" &&
-              bullet.bounces < PhysicsEngine.MAX_RICOCHET_BOUNCES
-            ) {
+            if (bullet.bounces < bullet.maxBounces) {
               bullet.bounces += 1;
             } else {
               this.bulletsToDestroy.add(bulletId);
@@ -759,6 +833,8 @@ export class PhysicsEngine {
     maxHp: number;
     alive: boolean;
     weapon: WeaponType;
+    inventory: WeaponType[];
+    activeSlot: number;
   } | null {
     const p = this.players.get(id);
     if (!p) return null;
@@ -770,6 +846,8 @@ export class PhysicsEngine {
       maxHp: p.maxHp,
       alive: p.alive,
       weapon: p.weapon,
+      inventory: [...p.inventory],
+      activeSlot: p.activeSlot,
     };
   }
 
@@ -829,7 +907,10 @@ export class PhysicsEngine {
     if (lenSq < 0.000001) {
       return { x: x1, y: y1 };
     }
-    const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
+    const t = Math.max(
+      0,
+      Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq)
+    );
     return {
       x: x1 + t * dx,
       y: y1 + t * dy,

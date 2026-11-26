@@ -1,16 +1,16 @@
-import { Schema, MapSchema, defineTypes } from "@colyseus/schema";
+import { Schema, MapSchema, ArraySchema, defineTypes } from "@colyseus/schema";
 import type {
+  ArenaTheme,
   BulletState,
   LootItemState,
   ObstacleState,
   ObstacleType,
-  PlayerState,
-  RoomStatus,
   RoundModifier,
+  RoomStatus,
   WeaponType,
 } from "@shared/types";
 
-export class PlayerSchema extends Schema implements PlayerState {
+export class PlayerSchema extends Schema {
   declare id: string;
   declare name: string;
   declare x: number;
@@ -23,11 +23,13 @@ export class PlayerSchema extends Schema implements PlayerState {
   declare score: number;
   declare ready: boolean;
   declare weapon: WeaponType;
+  declare inventory: ArraySchema<string>;
+  declare activeSlot: number;
 
   constructor() {
     super();
     this.id = "";
-    this.name = "Jugador";
+    this.name = "Agente";
     this.x = 180;
     this.y = 180;
     this.angle = 0;
@@ -38,6 +40,8 @@ export class PlayerSchema extends Schema implements PlayerState {
     this.score = 0;
     this.ready = false;
     this.weapon = "pistol";
+    this.inventory = new ArraySchema<string>("pistol");
+    this.activeSlot = 0;
   }
 }
 
@@ -54,6 +58,8 @@ defineTypes(PlayerSchema, {
   score: "number",
   ready: "boolean",
   weapon: "string",
+  inventory: ["string"],
+  activeSlot: "number",
 });
 
 export class ObstacleSchema extends Schema implements ObstacleState {
@@ -145,6 +151,8 @@ defineTypes(BulletSchema, {
 export class GameRoomState extends Schema {
   declare roomCode: string;
   declare status: RoomStatus;
+  declare theme: ArenaTheme;
+  declare preferredTheme: string;
   declare modifier: RoundModifier;
   declare mapWidth: number;
   declare mapHeight: number;
@@ -157,6 +165,8 @@ export class GameRoomState extends Schema {
     super();
     this.roomCode = "";
     this.status = "waiting";
+    this.theme = "cyber_outpost";
+    this.preferredTheme = "random";
     this.modifier = "normal";
     this.mapWidth = 1600;
     this.mapHeight = 1200;
@@ -170,6 +180,8 @@ export class GameRoomState extends Schema {
 defineTypes(GameRoomState, {
   roomCode: "string",
   status: "string",
+  theme: "string",
+  preferredTheme: "string",
   modifier: "string",
   mapWidth: "number",
   mapHeight: "number",
