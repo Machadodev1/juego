@@ -1,408 +1,641 @@
 import Matter from "matter-js";
 import type {
-  BulletBounceEvent,
+  BulletHitEvent,
   BulletState,
-  MazeGrid,
+  CrateDestroyedEvent,
+  LootItemState,
+  ObstacleState,
+  PlayerEliminatedEvent,
   PlayerInput,
-  TankDestroyedEvent,
+  RoundModifier,
+  WeaponType,
 } from "@shared/types";
+import { ArenaGenerator } from "./ArenaGenerator";
+import { WEAPON_CONFIGS } from "./WeaponConfig";
 
 export interface PhysicsCallbacks {
-  onBulletBounce?: (event: BulletBounceEvent) => void;
-  onTankDestroyed?: (event: TankDestroyedEvent) => void;
+  onBulletHit?: (event: BulletHitEvent) => void;
+  onCrateDestroyed?: (event: CrateDestroyedEvent, spawnedLoot: LootItemState) => void;
+  onObstacleDamaged?: (obstacleId: string, hp: number) => void;
+  onPlayerDamaged?: (playerId: string, hp: number) => void;
+  onPlayerHealed?: (playerId: string, hp: number) => void;
+  onPlayerWeaponChanged?: (playerId: string, weapon: WeaponType) => void;
+  onPlayerEliminated?: (event: PlayerEliminatedEvent) => void;
   onBulletRemoved?: (bulletId: string) => void;
+  onLootPickedUp?: (lootId: string, playerId: string) => void;
+}
+
+interface InternalPlayer {
+  id: string;
+  body: Matter.Body;
+  angle: number;
+  hp: number;
+  maxHp: number;
+  alive: boolean;
+  weapon: WeaponType;
+  lastShootTime: number;
+  interactPressed: boolean;
+}
+
+interface InternalObstacle {
+  state: ObstacleState;
+  body: Matter.Body;
 }
 
 interface InternalBullet {
   id: string;
   ownerId: string;
+  weaponType: WeaponType;
   body: Matter.Body;
-  createdAt: number;
-  speed: number;
-}
-
-interface InternalTank {
-  id: string;
-  body: Matter.Body;
-  alive: boolean;
-  lastShootTime: number;
-  lastShootInput: boolean;
+  stepSpeed: number;
+  speedPxPerSec: number;
+  baseDamage: number;
+  maxRangePx: number;
+  distanceTraveled: number;
+  bounces: number;
+  prevX: number;
+  prevY: number;
 }
 
 const CATEGORY_WALL = 0x0001;
-const CATEGORY_TANK = 0x0002;
-const CATEGORY_BULLET = 0x0004;
+const CATEGORY_OBSTACLE = 0x0002;
+const CATEGORY_PLAYER = 0x0004;
+const CATEGORY_BULLET = 0x0008;
 
 export class PhysicsEngine {
-  public static readonly TANK_WIDTH = 34;
-  public static readonly TANK_HEIGHT = 24;
-  public static readonly TANK_FORWARD_SPEED = 3.2;
-  public static readonly TANK_BACKWARD_SPEED = 2.2;
-  public static readonly TANK_TURN_SPEED = 0.065; // radianes por tick (60Hz)
-  public static readonly WALL_THICKNESS = 6;
-
-  public static readonly BULLET_RADIUS = 4;
-  public static readonly BULLET_SPEED = 5.5; // px por tick (60Hz) => 330 px/s
   public static readonly TICKS_PER_SECOND = 60;
-  public static readonly BULLET_TTL_MS = 8000;
-  public static readonly MAX_BULLETS_PER_TANK = 5;
-  public static readonly SELF_HIT_GRACE_MS = 150;
-  public static readonly SHOOT_COOLDOWN_MS = 280;
+  public static readonly SUBSTEPS = 2;
+
+  public static readonly PLAYER_RADIUS = 22;
+  public static readonly PLAYER_MAX_HP = 100;
+  public static readonly PLAYER_BASE_SPEED_PX_S = 260;
+  public static readonly SPEED_BOOST_MULTIPLIER = 1.4;
+
+  public static readonly BULLET_RADIUS = 5;
+  public static readonly MAX_RICOCHET_BOUNCES = 2;
+
+  public static readonly LOOT_AUTO_PICKUP_RADIUS = 42;
+  public static readonly LOOT_INTERACT_RADIUS = 52;
+  public static readonly MEDKIT_HEAL_AMOUNT = 35;
+  public static readonly VAMPIRE_HEAL_AMOUNT = 25;
 
   private engine: Matter.Engine;
   private world: Matter.World;
   private callbacks: PhysicsCallbacks;
 
-  private wallBodies: Matter.Body[] = [];
-  private tanks: Map<string, InternalTank> = new Map();
+  private mapWidth: number = ArenaGenerator.MAP_WIDTH;
+  private mapHeight: number = ArenaGenerator.MAP_HEIGHT;
+  private modifier: RoundModifier = "normal";
+
+  private borderWalls: Matter.Body[] = [];
+  private players: Map<string, InternalPlayer> = new Map();
+  private obstacles: Map<string, InternalObstacle> = new Map();
+  private lootItems: Map<string, LootItemState> = new Map();
   private bullets: Map<string, InternalBullet> = new Map();
+
   private bulletsToDestroy: Set<string> = new Set();
-  private tanksToDestroy: Array<{
-    victimId: string;
-    killerId: string;
-    x: number;
-    y: number;
+  private pendingWallHits: BulletHitEvent[] = [];
+  private pendingCrateHits: Array<{
+    obstacleId: string;
+    damage: number;
+    hitX: number;
+    hitY: number;
   }> = [];
-  private bulletsToNormalize: Set<string> = new Set();
-  private bulletCounter: number = 0;
+
+  private bulletSeq: number = 0;
 
   constructor(callbacks: PhysicsCallbacks = {}) {
     this.callbacks = callbacks;
+    // Asegurar rebotes elásticos exactos incluso en ángulos rasantes para el modificador "ricochet"
+    (Matter.Resolver as unknown as { _restingThresh: number })._restingThresh = 0.001;
     this.engine = Matter.Engine.create({
       gravity: { x: 0, y: 0, scale: 0 },
     });
     this.world = this.engine.world;
-
     this.registerCollisionEvents();
   }
 
+  public setModifier(modifier: RoundModifier): void {
+    this.modifier = modifier;
+  }
+
+  public getModifier(): RoundModifier {
+    return this.modifier;
+  }
+
   /**
-   * Construye los cuerpos estáticos para los muros del laberinto evitando duplicar
-   * muros compartidos entre celdas contiguas.
+   * Construye los 4 muros estáticos invisibles de los bordes del mapa y los
+   * cuerpos circulares estáticos de todos los obstáculos de la arena.
    */
-  public buildMazeWalls(maze: MazeGrid): void {
-    this.clearWalls();
+  public loadArena(
+    mapWidth: number,
+    mapHeight: number,
+    obstacles: ObstacleState[]
+  ): void {
+    this.resetArena();
+    this.mapWidth = mapWidth;
+    this.mapHeight = mapHeight;
 
-    const { rows, cols, cellSize, cells } = maze;
-    const thickness = PhysicsEngine.WALL_THICKNESS;
+    const wallThickness = 80;
+    const halfT = wallThickness / 2;
 
-    const wallOptions: Matter.IChamferableBodyDefinition = {
+    const borderWallOptions: Matter.IChamferableBodyDefinition = {
       isStatic: true,
       restitution: 1,
       friction: 0,
       frictionStatic: 0,
       frictionAir: 0,
       inertia: Infinity,
-      label: "wall",
+      slop: 0,
+      label: "border_wall",
       collisionFilter: {
         category: CATEGORY_WALL,
-        mask: CATEGORY_TANK | CATEGORY_BULLET,
+        mask: CATEGORY_PLAYER | CATEGORY_BULLET,
       },
     };
 
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const cell = cells[r][c];
-        const x0 = c * cellSize;
-        const y0 = r * cellSize;
+    this.borderWalls = [
+      // Arriba
+      Matter.Bodies.rectangle(
+        mapWidth / 2,
+        -halfT,
+        mapWidth + wallThickness * 2,
+        wallThickness,
+        borderWallOptions
+      ),
+      // Abajo
+      Matter.Bodies.rectangle(
+        mapWidth / 2,
+        mapHeight + halfT,
+        mapWidth + wallThickness * 2,
+        wallThickness,
+        borderWallOptions
+      ),
+      // Izquierda
+      Matter.Bodies.rectangle(
+        -halfT,
+        mapHeight / 2,
+        wallThickness,
+        mapHeight + wallThickness * 2,
+        borderWallOptions
+      ),
+      // Derecha
+      Matter.Bodies.rectangle(
+        mapWidth + halfT,
+        mapHeight / 2,
+        wallThickness,
+        mapHeight + wallThickness * 2,
+        borderWallOptions
+      ),
+    ];
 
-        // Muro superior (solo fila 0 para no duplicar con bottom de la fila anterior)
-        if (r === 0 && cell.walls.top) {
-          const topWall = Matter.Bodies.rectangle(
-            x0 + cellSize / 2,
-            y0,
-            cellSize + thickness,
-            thickness,
-            wallOptions
-          );
-          this.wallBodies.push(topWall);
-        }
+    Matter.Composite.add(this.world, this.borderWalls);
 
-        // Muro izquierdo (solo columna 0 para no duplicar con right de la columna anterior)
-        if (c === 0 && cell.walls.left) {
-          const leftWall = Matter.Bodies.rectangle(
-            x0,
-            y0 + cellSize / 2,
-            thickness,
-            cellSize + thickness,
-            wallOptions
-          );
-          this.wallBodies.push(leftWall);
-        }
-
-        // Muro derecho (todas las celdas)
-        if (cell.walls.right) {
-          const rightWall = Matter.Bodies.rectangle(
-            x0 + cellSize,
-            y0 + cellSize / 2,
-            thickness,
-            cellSize + thickness,
-            wallOptions
-          );
-          this.wallBodies.push(rightWall);
-        }
-
-        // Muro inferior (todas las celdas)
-        if (cell.walls.bottom) {
-          const bottomWall = Matter.Bodies.rectangle(
-            x0 + cellSize / 2,
-            y0 + cellSize,
-            cellSize + thickness,
-            thickness,
-            wallOptions
-          );
-          this.wallBodies.push(bottomWall);
-        }
-      }
-    }
-
-    Matter.Composite.add(this.world, this.wallBodies);
-  }
-
-  /**
-   * Crea o reposiciona el cuerpo físico de un tanque.
-   */
-  public spawnTank(id: string, x: number, y: number, angle: number): void {
-    this.removeTank(id);
-
-    const body = Matter.Bodies.rectangle(
-      x,
-      y,
-      PhysicsEngine.TANK_WIDTH,
-      PhysicsEngine.TANK_HEIGHT,
-      {
-        label: `tank:${id}`,
-        restitution: 0, // Sin rebotar en muros: deslizamiento limpio
-        friction: 0,
-        frictionStatic: 0,
-        frictionAir: 0,
-        inertia: Infinity, // Rotación controlada exclusivamente por input angular
-        chamfer: { radius: 4 },
-        collisionFilter: {
-          category: CATEGORY_TANK,
-          mask: CATEGORY_WALL | CATEGORY_TANK | CATEGORY_BULLET,
-        },
-      }
-    );
-
-    Matter.Body.setAngle(body, angle);
-    Matter.Composite.add(this.world, body);
-
-    this.tanks.set(id, {
-      id,
-      body,
-      alive: true,
-      lastShootTime: 0,
-      lastShootInput: false,
-    });
-  }
-
-  public removeTank(id: string): void {
-    const existing = this.tanks.get(id);
-    if (existing) {
-      Matter.Composite.remove(this.world, existing.body);
-      this.tanks.delete(id);
-    }
-  }
-
-  public setTankAlive(id: string, alive: boolean): void {
-    const tank = this.tanks.get(id);
-    if (!tank) return;
-    tank.alive = alive;
-    if (!alive) {
-      Matter.Composite.remove(this.world, tank.body);
-    }
-  }
-
-  /**
-   * Procesa el PlayerInput de un tanque para el frame actual:
-   * rotación angular, velocidad lineal y disparo.
-   */
-  public applyPlayerInput(playerId: string, input: PlayerInput, now: number = Date.now()): BulletState | null {
-    const tank = this.tanks.get(playerId);
-    if (!tank || !tank.alive) {
-      return null;
-    }
-
-    const { body } = tank;
-
-    // 1. Rotación angular controlada
-    let nextAngle = body.angle;
-    if (input.left && !input.right) {
-      nextAngle -= PhysicsEngine.TANK_TURN_SPEED;
-    } else if (input.right && !input.left) {
-      nextAngle += PhysicsEngine.TANK_TURN_SPEED;
-    }
-
-    // Normalizar ángulo en [-PI, PI]
-    nextAngle = Math.atan2(Math.sin(nextAngle), Math.cos(nextAngle));
-    Matter.Body.setAngle(body, nextAngle);
-    Matter.Body.setAngularVelocity(body, 0);
-
-    // 2. Movimiento lineal (avance / retroceso)
-    let linearSpeed = 0;
-    if (input.up && !input.down) {
-      linearSpeed = PhysicsEngine.TANK_FORWARD_SPEED;
-    } else if (input.down && !input.up) {
-      linearSpeed = -PhysicsEngine.TANK_BACKWARD_SPEED;
-    }
-
-    const vx = Math.cos(nextAngle) * linearSpeed;
-    const vy = Math.sin(nextAngle) * linearSpeed;
-    Matter.Body.setVelocity(body, { x: vx, y: vy });
-
-    // 3. Disparo con cooldown respetando máximo 5 balas activas por tanque
-    let spawnedBullet: BulletState | null = null;
-    const cooldownReady = now - tank.lastShootTime >= PhysicsEngine.SHOOT_COOLDOWN_MS;
-
-    if (input.shoot && cooldownReady) {
-      spawnedBullet = this.trySpawnBullet(tank, now);
-    }
-    tank.lastShootInput = input.shoot;
-
-    return spawnedBullet;
-  }
-
-  /**
-   * Intenta disparar una bala desde la punta del cañón del tanque, evitando
-   * atravesar muros cuando el cañón está pegado a una pared.
-   */
-  public trySpawnBullet(tank: InternalTank, now: number = Date.now()): BulletState | null {
-    const activeByOwner = this.countBulletsForOwner(tank.id);
-    if (activeByOwner >= PhysicsEngine.MAX_BULLETS_PER_TANK) {
-      return null;
-    }
-
-    tank.lastShootTime = now;
-
-    const angle = tank.body.angle;
-    const cos = Math.cos(angle);
-    const sin = Math.sin(angle);
-
-    const standardOffset = PhysicsEngine.TANK_WIDTH / 2 + PhysicsEngine.BULLET_RADIUS + 1; // 22px
-    const rayTarget = {
-      x: tank.body.position.x + cos * (standardOffset + PhysicsEngine.BULLET_RADIUS),
-      y: tank.body.position.y + sin * (standardOffset + PhysicsEngine.BULLET_RADIUS),
-    };
-
-    const wallHits = Matter.Query.ray(
-      this.wallBodies,
-      tank.body.position,
-      rayTarget,
-      PhysicsEngine.BULLET_RADIUS * 2
-    );
-
-    // Si hay un muro pegado frente al cañón, generar dentro de la celda para que rebote limpio
-    const muzzleOffset = wallHits.length > 0 ? 11 : standardOffset;
-    const spawnX = tank.body.position.x + cos * muzzleOffset;
-    const spawnY = tank.body.position.y + sin * muzzleOffset;
-    const stepVx = cos * PhysicsEngine.BULLET_SPEED;
-    const stepVy = sin * PhysicsEngine.BULLET_SPEED;
-
-    const bulletId = `b_${++this.bulletCounter}_${now}`;
-    const body = Matter.Bodies.circle(
-      spawnX,
-      spawnY,
-      PhysicsEngine.BULLET_RADIUS,
-      {
-        label: `bullet:${bulletId}`,
+    for (const obs of obstacles) {
+      const stateCopy: ObstacleState = { ...obs };
+      const body = Matter.Bodies.circle(obs.x, obs.y, obs.radius, {
+        isStatic: true,
         restitution: 1,
         friction: 0,
         frictionStatic: 0,
         frictionAir: 0,
         inertia: Infinity,
         slop: 0,
+        label: `obstacle:${obs.id}`,
         collisionFilter: {
-          category: CATEGORY_BULLET,
-          mask: CATEGORY_WALL | CATEGORY_TANK, // Las balas no colisionan entre sí
+          category: CATEGORY_OBSTACLE,
+          mask: CATEGORY_PLAYER | CATEGORY_BULLET,
         },
-      }
-    );
+      });
 
-    Matter.Body.setVelocity(body, { x: stepVx, y: stepVy });
-    Matter.Composite.add(this.world, body);
-
-    this.bullets.set(bulletId, {
-      id: bulletId,
-      ownerId: tank.id,
-      body,
-      createdAt: now,
-      speed: PhysicsEngine.BULLET_SPEED,
-    });
-
-    return {
-      id: bulletId,
-      ownerId: tank.id,
-      x: spawnX,
-      y: spawnY,
-      vx: stepVx * PhysicsEngine.TICKS_PER_SECOND,
-      vy: stepVy * PhysicsEngine.TICKS_PER_SECOND,
-    };
-  }
-
-  public countBulletsForOwner(ownerId: string): number {
-    let count = 0;
-    for (const bullet of this.bullets.values()) {
-      if (bullet.ownerId === ownerId) {
-        count++;
-      }
+      this.obstacles.set(obs.id, { state: stateCopy, body });
+      Matter.Composite.add(this.world, body);
     }
-    return count;
   }
 
   /**
-   * Avanza la simulación física un paso (`deltaMs`, por defecto 16.666 ms a 60 Hz),
-   * procesa expiraciones TTL de 8s, normaliza velocidades de balas y ejecuta bajas.
+   * Crea o reposiciona el cuerpo circular de un jugador con 100 HP y pistola inicial.
    */
-  public update(deltaMs: number = 1000 / 60, now: number = Date.now()): void {
-    const fixedStep = Math.min(deltaMs, 1000 / PhysicsEngine.TICKS_PER_SECOND);
-    Matter.Engine.update(this.engine, fixedStep);
+  public spawnPlayer(
+    id: string,
+    x: number,
+    y: number,
+    angle: number,
+    weapon: WeaponType = "pistol"
+  ): void {
+    this.removePlayer(id);
 
-    // 1. Procesar destrucciones de tanques detectadas durante las colisiones
-    if (this.tanksToDestroy.length > 0) {
-      const pendingKills = [...this.tanksToDestroy];
-      this.tanksToDestroy = [];
+    const body = Matter.Bodies.circle(x, y, PhysicsEngine.PLAYER_RADIUS, {
+      label: `player:${id}`,
+      restitution: 0,
+      friction: 0,
+      frictionStatic: 0,
+      frictionAir: 0,
+      inertia: Infinity,
+      collisionFilter: {
+        category: CATEGORY_PLAYER,
+        mask: CATEGORY_WALL | CATEGORY_OBSTACLE | CATEGORY_PLAYER,
+      },
+    });
 
-      for (const kill of pendingKills) {
-        const tank = this.tanks.get(kill.victimId);
-        if (tank && tank.alive) {
-          this.setTankAlive(kill.victimId, false);
-          this.callbacks.onTankDestroyed?.({
-            victimId: kill.victimId,
-            killerId: kill.killerId,
-            x: kill.x,
-            y: kill.y,
-          });
+    Matter.Composite.add(this.world, body);
+
+    this.players.set(id, {
+      id,
+      body,
+      angle,
+      hp: PhysicsEngine.PLAYER_MAX_HP,
+      maxHp: PhysicsEngine.PLAYER_MAX_HP,
+      alive: true,
+      weapon,
+      lastShootTime: -Infinity,
+      interactPressed: false,
+    });
+  }
+
+  public removePlayer(id: string): void {
+    const existing = this.players.get(id);
+    if (existing) {
+      Matter.Composite.remove(this.world, existing.body);
+      this.players.delete(id);
+    }
+  }
+
+  /**
+   * Aplica el PlayerInput de un jugador:
+   * - Movimiento lineal normalizado en 8 direcciones (+1.4x en "speed_boost")
+   * - Rotación de apuntado directa (`angle`)
+   * - Disparo respetando cooldown, cantidad de perdigones y dispersión del arma actual
+   */
+  public applyPlayerInput(
+    playerId: string,
+    input: PlayerInput,
+    now: number = Date.now()
+  ): BulletState[] {
+    const player = this.players.get(playerId);
+    if (!player || !player.alive) {
+      return [];
+    }
+
+    // 1. Actualizar ángulo de apuntado
+    if (typeof input.angle === "number" && Number.isFinite(input.angle)) {
+      player.angle = Math.atan2(Math.sin(input.angle), Math.cos(input.angle));
+    }
+
+    // 2. Velocidad lineal normalizada en 8 direcciones
+    let moveX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+    let moveY = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+
+    const length = Math.hypot(moveX, moveY);
+    if (length > 0) {
+      moveX /= length;
+      moveY /= length;
+    }
+
+    const speedMultiplier =
+      this.modifier === "speed_boost" ? PhysicsEngine.SPEED_BOOST_MULTIPLIER : 1;
+    const speedPxPerSec =
+      PhysicsEngine.PLAYER_BASE_SPEED_PX_S * speedMultiplier;
+    const stepSpeed = speedPxPerSec / PhysicsEngine.TICKS_PER_SECOND;
+
+    Matter.Body.setVelocity(player.body, {
+      x: moveX * stepSpeed,
+      y: moveY * stepSpeed,
+    });
+    Matter.Body.setAngularVelocity(player.body, 0);
+
+    player.interactPressed = Boolean(input.interact);
+
+    // 3. Disparo según configuración del arma equipada
+    const spawnedBullets: BulletState[] = [];
+    const weaponStats = WEAPON_CONFIGS[player.weapon];
+
+    if (input.shoot && now - player.lastShootTime >= weaponStats.cooldownMs) {
+      player.lastShootTime = now;
+      const created = this.spawnWeaponProjectiles(player, now);
+      spawnedBullets.push(...created);
+    }
+
+    return spawnedBullets;
+  }
+
+  private spawnWeaponProjectiles(
+    player: InternalPlayer,
+    now: number
+  ): BulletState[] {
+    const stats = WEAPON_CONFIGS[player.weapon];
+    const results: BulletState[] = [];
+    const spreadRad = (stats.spreadDeg * Math.PI) / 180;
+    const stepSpeed = stats.speedPxPerSec / PhysicsEngine.TICKS_PER_SECOND;
+    const muzzleDist =
+      PhysicsEngine.PLAYER_RADIUS + PhysicsEngine.BULLET_RADIUS + 4;
+
+    for (let i = 0; i < stats.projectiles; i++) {
+      let shotAngle = player.angle;
+
+      if (stats.projectiles > 1 && stats.fanSpread) {
+        const t = i / (stats.projectiles - 1) - 0.5; // [-0.5, +0.5]
+        shotAngle += t * spreadRad;
+      } else if (spreadRad > 0) {
+        shotAngle += (Math.random() - 0.5) * spreadRad;
+      }
+
+      const cos = Math.cos(shotAngle);
+      const sin = Math.sin(shotAngle);
+
+      // Evitar que el cañón atraviese muros/obstáculos si el jugador dispara pegado a ellos
+      const desiredX = player.body.position.x + cos * muzzleDist;
+      const desiredY = player.body.position.y + sin * muzzleDist;
+
+      const staticBodies = [
+        ...this.borderWalls,
+        ...Array.from(this.obstacles.values()).map((o) => o.body),
+      ];
+      const rayHits = Matter.Query.ray(
+        staticBodies,
+        player.body.position,
+        { x: desiredX, y: desiredY },
+        PhysicsEngine.BULLET_RADIUS * 2
+      );
+
+      const actualOffset = rayHits.length > 0 ? 6 : muzzleDist;
+      const spawnX = Math.max(
+        PhysicsEngine.BULLET_RADIUS + 1,
+        Math.min(
+          this.mapWidth - PhysicsEngine.BULLET_RADIUS - 1,
+          player.body.position.x + cos * actualOffset
+        )
+      );
+      const spawnY = Math.max(
+        PhysicsEngine.BULLET_RADIUS + 1,
+        Math.min(
+          this.mapHeight - PhysicsEngine.BULLET_RADIUS - 1,
+          player.body.position.y + sin * actualOffset
+        )
+      );
+
+      const vxStep = cos * stepSpeed;
+      const vyStep = sin * stepSpeed;
+      const vxPxSec = cos * stats.speedPxPerSec;
+      const vyPxSec = sin * stats.speedPxPerSec;
+
+      const bulletId = `b_${++this.bulletSeq}_${now}`;
+      const body = Matter.Bodies.circle(
+        spawnX,
+        spawnY,
+        PhysicsEngine.BULLET_RADIUS,
+        {
+          label: `bullet:${bulletId}`,
+          restitution: 1,
+          friction: 0,
+          frictionStatic: 0,
+          frictionAir: 0,
+          inertia: Infinity,
+          slop: 0,
+          collisionFilter: {
+            category: CATEGORY_BULLET,
+            mask: CATEGORY_WALL | CATEGORY_OBSTACLE,
+          },
+        }
+      );
+
+      Matter.Body.setVelocity(body, { x: vxStep, y: vyStep });
+      Matter.Composite.add(this.world, body);
+
+      this.bullets.set(bulletId, {
+        id: bulletId,
+        ownerId: player.id,
+        weaponType: stats.type,
+        body,
+        stepSpeed,
+        speedPxPerSec: stats.speedPxPerSec,
+        baseDamage: stats.damage,
+        maxRangePx: stats.maxRangePx,
+        distanceTraveled: 0,
+        bounces: 0,
+        prevX: spawnX,
+        prevY: spawnY,
+      });
+
+      results.push({
+        id: bulletId,
+        ownerId: player.id,
+        x: spawnX,
+        y: spawnY,
+        vx: vxPxSec,
+        vy: vyPxSec,
+        weaponType: stats.type,
+      });
+    }
+
+    return results;
+  }
+
+  /**
+   * Ejecuta un paso de simulación a 60 Hz con sub-stepping para precisión continua
+   * en proyectiles rápidos (p. ej. sniper a 1350 px/s).
+   */
+  public update(deltaMs: number = 1000 / 60): void {
+    const clampedDelta = Math.min(deltaMs, 1000 / PhysicsEngine.TICKS_PER_SECOND);
+    const subDelta = clampedDelta / PhysicsEngine.SUBSTEPS;
+
+    for (let step = 0; step < PhysicsEngine.SUBSTEPS; step++) {
+      for (const bullet of this.bullets.values()) {
+        bullet.prevX = bullet.body.position.x;
+        bullet.prevY = bullet.body.position.y;
+      }
+
+      Matter.Engine.update(this.engine, subDelta);
+
+      // 1. Procesar impactos contra muros/troncos/rocas y cajas registrados en Matter.js
+      this.flushEnvironmentHits();
+
+      // 2. Detección continua (segmento-círculo) de balas contra jugadores enemigos vivos
+      this.checkBulletPlayerHits();
+
+      // 3. Actualizar distancia recorrida, alcance máximo y normalización de velocidad tras rebote
+      for (const [bulletId, bullet] of this.bullets.entries()) {
+        if (this.bulletsToDestroy.has(bulletId)) continue;
+
+        const dx = bullet.body.position.x - bullet.prevX;
+        const dy = bullet.body.position.y - bullet.prevY;
+        bullet.distanceTraveled += Math.hypot(dx, dy);
+
+        if (bullet.distanceTraveled >= bullet.maxRangePx) {
+          this.bulletsToDestroy.add(bulletId);
+          continue;
+        }
+
+        this.normalizeBulletVelocity(bullet);
+      }
+
+      // 4. Limpiar balas destruidas en este sub-step
+      if (this.bulletsToDestroy.size > 0) {
+        for (const bulletId of this.bulletsToDestroy) {
+          this.removeBullet(bulletId);
+        }
+        this.bulletsToDestroy.clear();
+      }
+    }
+
+    // 5. Recolección de botín (< 42 px automático o <= 52 px con interact)
+    this.checkLootPickups();
+
+    // 6. Mantener velocidad angular 0 en los jugadores vivos
+    for (const player of this.players.values()) {
+      if (player.alive) {
+        Matter.Body.setAngularVelocity(player.body, 0);
+      }
+    }
+  }
+
+  private flushEnvironmentHits(): void {
+    if (this.pendingWallHits.length > 0) {
+      const hits = [...this.pendingWallHits];
+      this.pendingWallHits = [];
+      for (const hit of hits) {
+        this.callbacks.onBulletHit?.(hit);
+      }
+    }
+
+    if (this.pendingCrateHits.length > 0) {
+      const crateHits = [...this.pendingCrateHits];
+      this.pendingCrateHits = [];
+
+      for (const hit of crateHits) {
+        this.callbacks.onBulletHit?.({
+          x: hit.hitX,
+          y: hit.hitY,
+          targetType: "crate",
+        });
+
+        const obs = this.obstacles.get(hit.obstacleId);
+        if (!obs) continue;
+
+        obs.state.hp = Math.max(0, obs.state.hp - hit.damage);
+
+        if (obs.state.hp <= 0) {
+          const { id, x, y } = obs.state;
+          Matter.Composite.remove(this.world, obs.body);
+          this.obstacles.delete(id);
+
+          const loot = ArenaGenerator.generateLootFromCrate(x, y);
+          this.lootItems.set(loot.id, loot);
+
+          this.callbacks.onCrateDestroyed?.({ id, x, y }, loot);
+        } else {
+          this.callbacks.onObstacleDamaged?.(obs.state.id, obs.state.hp);
         }
       }
     }
+  }
 
-    // 2. Verificar TTL (8 segundos) de las balas activas
+  private checkBulletPlayerHits(): void {
+    const hitRadius = PhysicsEngine.PLAYER_RADIUS + PhysicsEngine.BULLET_RADIUS;
+    const hitRadiusSq = hitRadius * hitRadius;
+    const damageMultiplier = this.modifier === "double_damage" ? 2 : 1;
+
     for (const [bulletId, bullet] of this.bullets.entries()) {
-      if (now - bullet.createdAt >= PhysicsEngine.BULLET_TTL_MS) {
-        this.bulletsToDestroy.add(bulletId);
+      if (this.bulletsToDestroy.has(bulletId)) continue;
+
+      const x1 = bullet.prevX;
+      const y1 = bullet.prevY;
+      const x2 = bullet.body.position.x;
+      const y2 = bullet.body.position.y;
+
+      for (const victim of this.players.values()) {
+        if (!victim.alive || victim.id === bullet.ownerId) continue;
+
+        const px = victim.body.position.x;
+        const py = victim.body.position.y;
+
+        const closest = this.closestPointOnSegment(x1, y1, x2, y2, px, py);
+        const dx = px - closest.x;
+        const dy = py - closest.y;
+
+        if (dx * dx + dy * dy <= hitRadiusSq) {
+          this.bulletsToDestroy.add(bulletId);
+
+          const totalDamage = bullet.baseDamage * damageMultiplier;
+          victim.hp = Math.max(0, victim.hp - totalDamage);
+
+          this.callbacks.onBulletHit?.({
+            x: closest.x,
+            y: closest.y,
+            targetType: "player",
+          });
+          this.callbacks.onPlayerDamaged?.(victim.id, victim.hp);
+
+          if (victim.hp <= 0) {
+            victim.alive = false;
+            const elimX = victim.body.position.x;
+            const elimY = victim.body.position.y;
+            Matter.Composite.remove(this.world, victim.body);
+
+            // Modificador "vampire": cura +25 HP al atacante sin superar maxHp (100)
+            if (this.modifier === "vampire") {
+              const killer = this.players.get(bullet.ownerId);
+              if (killer && killer.alive) {
+                killer.hp = Math.min(
+                  killer.maxHp,
+                  killer.hp + PhysicsEngine.VAMPIRE_HEAL_AMOUNT
+                );
+                this.callbacks.onPlayerHealed?.(killer.id, killer.hp);
+              }
+            }
+
+            this.callbacks.onPlayerEliminated?.({
+              victimId: victim.id,
+              killerId: bullet.ownerId,
+              x: elimX,
+              y: elimY,
+            });
+          }
+
+          break;
+        }
       }
     }
+  }
 
-    // 3. Eliminar balas destruidas o expiradas
-    if (this.bulletsToDestroy.size > 0) {
-      for (const bulletId of this.bulletsToDestroy) {
-        this.removeBullet(bulletId);
-      }
-      this.bulletsToDestroy.clear();
-    }
+  private checkLootPickups(): void {
+    if (this.lootItems.size === 0) return;
 
-    // 4. Normalizar siempre la velocidad de todas las balas activas para que
-    // mantengan rapidez constante tras cualquier rebote elástico en muros
-    for (const bullet of this.bullets.values()) {
-      this.normalizeBulletVelocity(bullet);
-    }
-    this.bulletsToNormalize.clear();
+    const autoRadiusSq =
+      PhysicsEngine.LOOT_AUTO_PICKUP_RADIUS *
+      PhysicsEngine.LOOT_AUTO_PICKUP_RADIUS;
+    const interactRadiusSq =
+      PhysicsEngine.LOOT_INTERACT_RADIUS *
+      PhysicsEngine.LOOT_INTERACT_RADIUS;
 
-    // 5. Asegurar que los tanques no acumulen rotación residual por colisión con muros
-    for (const tank of this.tanks.values()) {
-      if (tank.alive) {
-        Matter.Body.setAngularVelocity(tank.body, 0);
+    for (const [lootId, loot] of Array.from(this.lootItems.entries())) {
+      for (const player of this.players.values()) {
+        if (!player.alive) continue;
+
+        const dx = player.body.position.x - loot.x;
+        const dy = player.body.position.y - loot.y;
+        const distSq = dx * dx + dy * dy;
+
+        const thresholdSq = player.interactPressed
+          ? interactRadiusSq
+          : autoRadiusSq;
+
+        if (distSq < thresholdSq) {
+          if (loot.kind === "medkit") {
+            player.hp = Math.min(
+              player.maxHp,
+              player.hp + PhysicsEngine.MEDKIT_HEAL_AMOUNT
+            );
+            this.callbacks.onPlayerHealed?.(player.id, player.hp);
+          } else if (loot.kind === "weapon" && loot.weaponType) {
+            player.weapon = loot.weaponType;
+            this.callbacks.onPlayerWeaponChanged?.(player.id, loot.weaponType);
+          }
+
+          this.lootItems.delete(lootId);
+          this.callbacks.onLootPickedUp?.(lootId, player.id);
+          break;
+        }
       }
     }
   }
@@ -412,17 +645,16 @@ export class PhysicsEngine {
     const currentSpeed = Math.hypot(vel.x, vel.y);
 
     if (currentSpeed < 0.0001) {
-      // Caso degenerado: reasignar dirección aleatoria manteniendo velocidad constante
       const randomAngle = Math.random() * Math.PI * 2;
       Matter.Body.setVelocity(bullet.body, {
-        x: Math.cos(randomAngle) * bullet.speed,
-        y: Math.sin(randomAngle) * bullet.speed,
+        x: Math.cos(randomAngle) * bullet.stepSpeed,
+        y: Math.sin(randomAngle) * bullet.stepSpeed,
       });
       return;
     }
 
-    if (Math.abs(currentSpeed - bullet.speed) > 0.001) {
-      const scale = bullet.speed / currentSpeed;
+    if (Math.abs(currentSpeed - bullet.stepSpeed) > 0.0005) {
+      const scale = bullet.stepSpeed / currentSpeed;
       Matter.Body.setVelocity(bullet.body, {
         x: vel.x * scale,
         y: vel.y * scale,
@@ -430,144 +662,178 @@ export class PhysicsEngine {
     }
   }
 
-  public removeBullet(bulletId: string): void {
-    const bullet = this.bullets.get(bulletId);
-    if (!bullet) return;
-
-    Matter.Composite.remove(this.world, bullet.body);
-    this.bullets.delete(bulletId);
-    this.callbacks.onBulletRemoved?.(bulletId);
-  }
-
-  public clearBullets(): void {
-    for (const bulletId of Array.from(this.bullets.keys())) {
-      this.removeBullet(bulletId);
-    }
-    this.bulletsToDestroy.clear();
-    this.bulletsToNormalize.clear();
-  }
-
-  public clearWalls(): void {
-    if (this.wallBodies.length > 0) {
-      Matter.Composite.remove(this.world, this.wallBodies);
-      this.wallBodies = [];
-    }
-  }
-
-  public resetRound(): void {
-    this.clearBullets();
-    for (const tank of this.tanks.values()) {
-      Matter.Composite.remove(this.world, tank.body);
-    }
-    this.tanks.clear();
-    this.tanksToDestroy = [];
-  }
-
-  public getTankTransform(id: string): { x: number; y: number; angle: number; alive: boolean } | null {
-    const tank = this.tanks.get(id);
-    if (!tank) return null;
-    return {
-      x: tank.body.position.x,
-      y: tank.body.position.y,
-      angle: tank.body.angle,
-      alive: tank.alive,
-    };
-  }
-
-  public getActiveBullets(): BulletState[] {
-    const list: BulletState[] = [];
-    for (const bullet of this.bullets.values()) {
-      list.push({
-        id: bullet.id,
-        ownerId: bullet.ownerId,
-        x: bullet.body.position.x,
-        y: bullet.body.position.y,
-        vx: bullet.body.velocity.x * PhysicsEngine.TICKS_PER_SECOND,
-        vy: bullet.body.velocity.y * PhysicsEngine.TICKS_PER_SECOND,
-      });
-    }
-    return list;
-  }
-
-  private handleTankHitPair(
-    bulletBody: Matter.Body,
-    otherBody: Matter.Body,
-    now: number
-  ): void {
-    if (!otherBody.label.startsWith("tank:")) return;
-
-    const bulletId = bulletBody.label.slice("bullet:".length);
-    const bullet = this.bullets.get(bulletId);
-    if (!bullet || this.bulletsToDestroy.has(bulletId)) return;
-
-    const victimId = otherBody.label.slice("tank:".length);
-    const victimTank = this.tanks.get(victimId);
-    if (!victimTank || !victimTank.alive) return;
-
-    // Ignorar el propio tanque durante los primeros 150 ms tras disparar
-    const elapsedMs = now - bullet.createdAt;
-    if (victimId === bullet.ownerId && elapsedMs < PhysicsEngine.SELF_HIT_GRACE_MS) {
-      return;
-    }
-
-    this.bulletsToDestroy.add(bulletId);
-    this.tanksToDestroy.push({
-      victimId,
-      killerId: bullet.ownerId,
-      x: victimTank.body.position.x,
-      y: victimTank.body.position.y,
-    });
-  }
-
   private registerCollisionEvents(): void {
     Matter.Events.on(this.engine, "collisionStart", (event) => {
-      const now = Date.now();
+      const damageMultiplier = this.modifier === "double_damage" ? 2 : 1;
 
       for (const pair of event.pairs) {
-        const { bodyA, bodyB } = pair;
-        const bulletBody = this.extractBodyByPrefix(bodyA, bodyB, "bullet:");
+        const bulletBody = this.extractBodyByPrefix(
+          pair.bodyA,
+          pair.bodyB,
+          "bullet:"
+        );
         if (!bulletBody) continue;
 
-        const otherBody = bulletBody === bodyA ? bodyB : bodyA;
+        const otherBody = bulletBody === pair.bodyA ? pair.bodyB : pair.bodyA;
         const bulletId = bulletBody.label.slice("bullet:".length);
         const bullet = this.bullets.get(bulletId);
-        if (!bullet) continue;
+        if (!bullet || this.bulletsToDestroy.has(bulletId)) continue;
 
-        if (otherBody.label === "wall") {
-          // Rebote elástico en muro: normalizar velocidad y notificar evento bulletBounce
-          this.bulletsToNormalize.add(bulletId);
-          this.callbacks.onBulletBounce?.({
-            x: bulletBody.position.x,
-            y: bulletBody.position.y,
-          });
-        } else {
-          this.handleTankHitPair(bulletBody, otherBody, now);
+        const hitX = bulletBody.position.x;
+        const hitY = bulletBody.position.y;
+
+        if (otherBody.label === "border_wall") {
+          if (
+            this.modifier === "ricochet" &&
+            bullet.bounces < PhysicsEngine.MAX_RICOCHET_BOUNCES
+          ) {
+            bullet.bounces += 1;
+          } else {
+            this.bulletsToDestroy.add(bulletId);
+            this.pendingWallHits.push({ x: hitX, y: hitY, targetType: "wall" });
+          }
+          continue;
         }
-      }
-    });
 
-    Matter.Events.on(this.engine, "collisionActive", (event) => {
-      const now = Date.now();
-      for (const pair of event.pairs) {
-        const { bodyA, bodyB } = pair;
-        const bulletBody = this.extractBodyByPrefix(bodyA, bodyB, "bullet:");
-        if (!bulletBody) continue;
-        const otherBody = bulletBody === bodyA ? bodyB : bodyA;
-        this.handleTankHitPair(bulletBody, otherBody, now);
+        if (otherBody.label.startsWith("obstacle:")) {
+          const obstacleId = otherBody.label.slice("obstacle:".length);
+          const obs = this.obstacles.get(obstacleId);
+          if (!obs) continue;
+
+          if (obs.state.type === "rock") {
+            if (
+              this.modifier === "ricochet" &&
+              bullet.bounces < PhysicsEngine.MAX_RICOCHET_BOUNCES
+            ) {
+              bullet.bounces += 1;
+            } else {
+              this.bulletsToDestroy.add(bulletId);
+              this.pendingWallHits.push({ x: hitX, y: hitY, targetType: "wall" });
+            }
+          } else if (obs.state.type === "tree") {
+            this.bulletsToDestroy.add(bulletId);
+            this.pendingWallHits.push({ x: hitX, y: hitY, targetType: "wall" });
+          } else if (obs.state.type === "crate") {
+            this.bulletsToDestroy.add(bulletId);
+            this.pendingCrateHits.push({
+              obstacleId,
+              damage: bullet.baseDamage * damageMultiplier,
+              hitX,
+              hitY,
+            });
+          }
+        }
       }
     });
 
     Matter.Events.on(this.engine, "collisionEnd", (event) => {
       for (const pair of event.pairs) {
-        const bulletBody = this.extractBodyByPrefix(pair.bodyA, pair.bodyB, "bullet:");
+        const bulletBody = this.extractBodyByPrefix(
+          pair.bodyA,
+          pair.bodyB,
+          "bullet:"
+        );
         if (!bulletBody) continue;
         const bulletId = bulletBody.label.slice("bullet:".length);
         const bullet = this.bullets.get(bulletId);
-        if (bullet) {
+        if (bullet && !this.bulletsToDestroy.has(bulletId)) {
           this.normalizeBulletVelocity(bullet);
         }
       }
     });
+  }
+
+  public removeBullet(bulletId: string): void {
+    const bullet = this.bullets.get(bulletId);
+    if (!bullet) return;
+    Matter.Composite.remove(this.world, bullet.body);
+    this.bullets.delete(bulletId);
+    this.callbacks.onBulletRemoved?.(bulletId);
+  }
+
+  public getPlayerSnapshot(id: string): {
+    x: number;
+    y: number;
+    angle: number;
+    hp: number;
+    maxHp: number;
+    alive: boolean;
+    weapon: WeaponType;
+  } | null {
+    const p = this.players.get(id);
+    if (!p) return null;
+    return {
+      x: p.body.position.x,
+      y: p.body.position.y,
+      angle: p.angle,
+      hp: p.hp,
+      maxHp: p.maxHp,
+      alive: p.alive,
+      weapon: p.weapon,
+    };
+  }
+
+  public getActiveBullets(): BulletState[] {
+    const list: BulletState[] = [];
+    for (const b of this.bullets.values()) {
+      list.push({
+        id: b.id,
+        ownerId: b.ownerId,
+        x: b.body.position.x,
+        y: b.body.position.y,
+        vx: b.body.velocity.x * PhysicsEngine.TICKS_PER_SECOND,
+        vy: b.body.velocity.y * PhysicsEngine.TICKS_PER_SECOND,
+        weaponType: b.weaponType,
+      });
+    }
+    return list;
+  }
+
+  public resetArena(): void {
+    for (const bId of Array.from(this.bullets.keys())) {
+      this.removeBullet(bId);
+    }
+    this.bulletsToDestroy.clear();
+    this.pendingWallHits = [];
+    this.pendingCrateHits = [];
+
+    for (const p of this.players.values()) {
+      Matter.Composite.remove(this.world, p.body);
+    }
+    this.players.clear();
+
+    for (const obs of this.obstacles.values()) {
+      Matter.Composite.remove(this.world, obs.body);
+    }
+    this.obstacles.clear();
+
+    if (this.borderWalls.length > 0) {
+      Matter.Composite.remove(this.world, this.borderWalls);
+      this.borderWalls = [];
+    }
+
+    this.lootItems.clear();
+  }
+
+  private closestPointOnSegment(
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    px: number,
+    py: number
+  ): { x: number; y: number } {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq < 0.000001) {
+      return { x: x1, y: y1 };
+    }
+    const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
+    return {
+      x: x1 + t * dx,
+      y: y1 + t * dy,
+    };
   }
 
   private extractBodyByPrefix(

@@ -10,7 +10,7 @@ dotenv.config();
 
 const isVercel = Boolean(process.env.VERCEL);
 const PORT = Number(process.env.PORT) || 2567;
-const CORS_ORIGIN = process.env.CORS_ORIGIN || "";
+const CORS_ORIGIN = process.env.CORS_ORIGIN || "http://localhost:5173";
 
 const allowedOrigins = CORS_ORIGIN.split(",")
   .map((o) => o.trim())
@@ -44,10 +44,11 @@ app.use(
 );
 app.use(express.json());
 
-app.get(["/health", "/api/health", "/api"], (_req, res) => {
+app.get(["/", "/health", "/api/health", "/api"], (_req, res) => {
   res.json({
     status: "ok",
     game: "Bala Perdida",
+    mode: "arena_shooter_2d",
     version: "1.0.0",
   });
 });
@@ -62,11 +63,10 @@ const gameServer = new Server({
   gracefullyShutdown: !isVercel,
 });
 
-// Registrar la sala multijugador "tank_room" permitiendo filtrar por código de sala ("roomCode")
+// Registrar la sala multijugador "tank_room" permitiendo filtrar por código ("roomCode")
 gameServer.define("tank_room", TankRoom).filterBy(["roomCode"]);
 
-// Reemplazar el interceptor crudo req.on("data") de Colyseus por rutas Express nativas
-// para soportar req.body pre-parseado en Vercel Functions sin cuelgues ni errores 500
+// Usar rutas Express nativas para matchmaking (soporta desarrollo local en :2567 y proxy /api)
 httpServer.removeAllListeners("request");
 httpServer.on("request", app);
 
@@ -147,9 +147,9 @@ if (isVercel) {
   void ensureMatchMakerReady();
 } else {
   matchMakerAcceptPromise = gameServer.listen(PORT).then(() => {
-    console.log(`🚀 [Bala Perdida Server] Escuchando en ws://localhost:${PORT}`);
+    console.log(`🚀 [Bala Perdida Arena Server] Escuchando en ws://localhost:${PORT}`);
+    console.log(`🌐 [CORS] Permitido para: ${CORS_ORIGIN}`);
   });
 }
 
-export { app, httpServer, gameServer };
 export default httpServer;

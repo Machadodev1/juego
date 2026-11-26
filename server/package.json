@@ -1,7 +1,7 @@
 {
   "name": "bala-perdida-server",
   "version": "1.0.0",
-  "description": "Servidor autoritativo para Bala Perdida (Colyseus + Matter.js)",
+  "description": "Servidor autoritativo Top-Down Arena Shooter 2D para Bala Perdida (Colyseus + Matter.js)",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
