@@ -1,5 +1,5 @@
 import { Schema, MapSchema, type } from "@colyseus/schema";
-import { BulletState, PlayerState, RoomStatus } from "@shared/types";
+import type { BulletState, PlayerState, RoomStatus } from "@shared/types";
 
 export class PlayerSchema extends Schema implements PlayerState {
   @type("string") id: string = "";

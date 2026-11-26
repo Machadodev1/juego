@@ -1,5 +1,5 @@
 import { Client, Delayed, Room } from "colyseus";
-import {
+import type {
   BulletBounceEvent,
   PlayerInput,
   RoundEndEvent,

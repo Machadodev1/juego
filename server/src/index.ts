@@ -2,18 +2,28 @@ import http from "http";
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { Server } from "colyseus";
+import { Server, matchMaker } from "colyseus";
 import { WebSocketTransport } from "@colyseus/ws-transport";
 import { TankRoom } from "./rooms/TankRoom";
 
 dotenv.config();
 
+const isVercel = Boolean(process.env.VERCEL);
 const PORT = Number(process.env.PORT) || 2567;
-const CORS_ORIGIN = process.env.CORS_ORIGIN || "http://localhost:5173";
+const CORS_ORIGIN = process.env.CORS_ORIGIN || "";
+
+const allowedOrigins = CORS_ORIGIN.split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+if (process.env.VERCEL_URL) {
+  allowedOrigins.push(`https://${process.env.VERCEL_URL}`);
+}
+if (process.env.VERCEL_PROJECT_PRODUCTION_URL) {
+  allowedOrigins.push(`https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`);
+}
 
 const app = express();
-
-const allowedOrigins = CORS_ORIGIN.split(",").map((o) => o.trim());
 
 app.use(
   cors({
@@ -33,7 +43,7 @@ app.use(
 );
 app.use(express.json());
 
-app.get("/health", (_req, res) => {
+app.get(["/health", "/api/health", "/api"], (_req, res) => {
   res.json({
     status: "ok",
     game: "Bala Perdida",
@@ -47,12 +57,21 @@ const gameServer = new Server({
   transport: new WebSocketTransport({
     server: httpServer,
   }),
+  greet: !isVercel,
+  gracefullyShutdown: !isVercel,
 });
 
 // Registrar la sala multijugador "tank_room" permitiendo filtrar por código de sala ("roomCode")
 gameServer.define("tank_room", TankRoom).filterBy(["roomCode"]);
 
-gameServer.listen(PORT).then(() => {
-  console.log(`🚀 [Bala Perdida Server] Escuchando en ws://localhost:${PORT}`);
-  console.log(`🌐 [CORS] Permitido para: ${CORS_ORIGIN}`);
-});
+if (isVercel) {
+  // En Vercel Functions / vercel dev no se invoca .listen(); activamos el matchMaker directamente
+  void matchMaker.accept();
+} else {
+  gameServer.listen(PORT).then(() => {
+    console.log(`🚀 [Bala Perdida Server] Escuchando en ws://localhost:${PORT}`);
+  });
+}
+
+export { app, httpServer, gameServer };
+export default httpServer;

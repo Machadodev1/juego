@@ -1,4 +1,4 @@
-import { MazeCell, MazeGrid } from "@shared/types";
+import type { MazeCell, MazeGrid } from "@shared/types";
 
 export interface SpawnPoint {
   x: number;

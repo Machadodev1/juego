@@ -12,6 +12,6 @@ export const NEON_COLORS: TankColorOption[] = [
 ];
 
 export const MAX_SCORE_TO_WIN = 5;
-export const SERVER_URL = import.meta.env.VITE_SERVER_URL || "ws://localhost:2567";
+export const SERVER_URL = import.meta.env.VITE_SERVER_URL || "/api";
 export const NICKNAME_STORAGE_KEY = "bala_perdida_nickname";
 export const COLOR_STORAGE_KEY = "bala_perdida_color";
