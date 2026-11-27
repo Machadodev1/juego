@@ -12,12 +12,12 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ["Inter", "system-ui", "sans-serif"],
-        mono: ["JetBrains Mono", "Fira Code", "monospace"],
+        sans: ["'Inter'", "system-ui", "sans-serif"],
+        display: ["'Chakra Petch'", "system-ui", "sans-serif"],
+        mono: ["'Chakra Petch'", "ui-monospace", "monospace"],
       },
       boxShadow: {
-        neon: "0 0 18px rgba(34, 211, 238, 0.35)",
-        "neon-pink": "0 0 18px rgba(236, 72, 153, 0.35)",
+        amber: "0 0 20px rgba(245, 158, 11, 0.25)",
       },
     },
   },

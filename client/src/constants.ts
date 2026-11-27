@@ -31,24 +31,28 @@ export const MAX_SCORE_TO_WIN = 5;
 
 export interface PlayerColorOption {
   name: string;
+  code: string;
   hex: string;
-  glow: string;
 }
 
-export const NEON_COLORS: PlayerColorOption[] = [
-  { name: "Cian Eléctrico", hex: "#22D3EE", glow: "rgba(34, 211, 238, 0.55)" },
-  { name: "Rosa Caos", hex: "#EC4899", glow: "rgba(236, 72, 153, 0.55)" },
-  { name: "Lima Tóxico", hex: "#A3E635", glow: "rgba(163, 230, 53, 0.55)" },
-  { name: "Ámbar Nitro", hex: "#F59E0B", glow: "rgba(245, 158, 11, 0.55)" },
-  { name: "Violeta Nova", hex: "#A855F7", glow: "rgba(168, 85, 247, 0.55)" },
-  { name: "Coral Carmesí", hex: "#EF4444", glow: "rgba(239, 68, 68, 0.55)" },
+export const TACTICAL_COLORS: PlayerColorOption[] = [
+  { name: "Ámbar Dorado", code: "AMBER", hex: "#F59E0B" },
+  { name: "Esmeralda", code: "EMERALD", hex: "#10B981" },
+  { name: "Azul Cielo", code: "SKY", hex: "#0EA5E9" },
+  { name: "Carmesí", code: "CRIMSON", hex: "#EF4444" },
+  { name: "Violeta Pizarra", code: "VIOLET", hex: "#8B5CF6" },
+  { name: "Blanco Táctico", code: "GHOST", hex: "#F8FAFC" },
 ];
+
+// Alias mantenido por compatibilidad
+export const NEON_COLORS = TACTICAL_COLORS;
 
 export interface AbilityMeta {
   id: AbilityType;
+  code: string;
   label: string;
-  emoji: string;
   cooldownSec: number;
+  cooldownLabel: string;
   desc: string;
   accentHex: string;
 }
@@ -63,39 +67,44 @@ export const ABILITY_ORDER: AbilityType[] = [
 export const ABILITY_META: Record<AbilityType, AbilityMeta> = {
   dash: {
     id: "dash",
-    label: "Dash Relámpago",
-    emoji: "💨",
+    code: "DASH",
+    label: "Dash Táctico",
     cooldownSec: 4,
-    desc: "Impulso veloz + 150 ms invulnerable",
-    accentHex: "#38BDF8",
+    cooldownLabel: "4.0s CD",
+    desc: "Impulso evasivo + 150ms inmune",
+    accentHex: "#F59E0B",
   },
   energy_shield: {
     id: "energy_shield",
-    label: "Escudo de Energía",
-    emoji: "🛡️",
+    code: "SHIELD",
+    label: "Escudo Frontal",
     cooldownSec: 8,
-    desc: "Refleja balas frontales durante 2.5s",
-    accentHex: "#60A5FA",
+    cooldownLabel: "8.0s CD",
+    desc: "Refleja fuego frontal por 2.5s",
+    accentHex: "#0EA5E9",
   },
   proximity_mine: {
     id: "proximity_mine",
-    label: "Mina de Proximidad",
-    emoji: "💣",
+    code: "MINE",
+    label: "Mina Proximidad",
     cooldownSec: 10,
-    desc: "Trampa oculta que detona (45 DMG)",
-    accentHex: "#F87171",
+    cooldownLabel: "10.0s CD",
+    desc: "Carga explosiva oculta (45 DMG)",
+    accentHex: "#EF4444",
   },
   smoke_grenade: {
     id: "smoke_grenade",
-    label: "Granada de Humo",
-    emoji: "🌫️",
+    code: "SMOKE",
+    label: "Cortina de Humo",
     cooldownSec: 9,
-    desc: "Nube densa que te vuelve invisible",
+    cooldownLabel: "9.0s CD",
+    desc: "Despliega cobertura de sigilo",
     accentHex: "#94A3B8",
   },
 };
 
 export interface WeaponMeta {
+  code: string;
   label: string;
   shortStats: string;
   badgeHex: string;
@@ -104,135 +113,133 @@ export interface WeaponMeta {
 
 export const WEAPON_META: Record<WeaponType, WeaponMeta> = {
   pistol: {
+    code: "PISTOL",
     label: "Pistola",
-    shortStats: "15 DMG · Equilibrada",
+    shortStats: "15 DMG · SEMI",
     badgeHex: "#94A3B8",
   },
   shotgun: {
+    code: "SHOTGUN",
     label: "Escopeta",
-    shortStats: "5×12 DMG · Corto alcance",
-    badgeHex: "#F97316",
+    shortStats: "5×12 DMG · SPREAD",
+    badgeHex: "#F59E0B",
   },
   rifle: {
-    label: "Rifle de Asalto",
-    shortStats: "14 DMG · Ráfaga automática",
-    badgeHex: "#38BDF8",
+    code: "RIFLE",
+    label: "Rifle",
+    shortStats: "14 DMG · AUTO",
+    badgeHex: "#0EA5E9",
   },
   sniper: {
+    code: "SNIPER",
     label: "Francotirador",
-    shortStats: "65 DMG · Bala supersónica",
-    badgeHex: "#F43F5E",
+    shortStats: "65 DMG · RAIL",
+    badgeHex: "#EF4444",
   },
   impulse_gun: {
-    label: "Cañón de Impulso",
-    shortStats: "5 DMG · Empuje brutal",
-    badgeHex: "#22D3EE",
+    code: "IMPULSE",
+    label: "Cañón Impulso",
+    shortStats: "KNOCKBACK",
+    badgeHex: "#0EA5E9",
     isSpecial: true,
   },
   flamethrower: {
+    code: "FLAMER",
     label: "Lanzallamas",
-    shortStats: "Fuego continuo · Quema el suelo",
-    badgeHex: "#FB923C",
+    shortStats: "NAPALM ZONE",
+    badgeHex: "#F59E0B",
     isSpecial: true,
   },
   saw_disc: {
+    code: "SAW DISC",
     label: "Disco Sierra",
-    shortStats: "28 DMG · 3 rebotes + boomerang",
-    badgeHex: "#FACC15",
+    shortStats: "28 DMG · BOOMERANG",
+    badgeHex: "#F59E0B",
     isSpecial: true,
   },
   bee_cannon: {
-    label: "Cañón de Abejas",
-    shortStats: "2×16 DMG · Enjambre teledirigido",
-    badgeHex: "#EAB308",
+    code: "SWARM",
+    label: "Cañón Abejas",
+    shortStats: "HOMING",
+    badgeHex: "#F59E0B",
     isSpecial: true,
   },
   grappling_hook: {
+    code: "GRAPPLE",
     label: "Gancho Arpeo",
-    shortStats: "20 DMG · Te lanza al impacto",
-    badgeHex: "#A855F7",
+    shortStats: "RAPID PULL",
+    badgeHex: "#8B5CF6",
     isSpecial: true,
   },
 };
 
 export interface ModifierMeta {
+  code: string;
   label: string;
-  emoji: string;
   desc: string;
-  pillClass: string;
-  bannerGradient: string;
+  accentClass: string;
 }
 
 export const MODIFIER_META: Record<RoundModifier, ModifierMeta> = {
   normal: {
-    label: "Estándar",
-    emoji: "⚔️",
-    desc: "Reglas clásicas de la arena caótica",
-    pillClass: "border-slate-600/70 bg-slate-800/85 text-slate-200",
-    bannerGradient: "from-slate-800/95 via-slate-900/95 to-slate-800/95",
+    code: "STANDARD",
+    label: "Standard Ops",
+    desc: "Parámetros tácticos estándar de combate",
+    accentClass: "border-slate-600 text-slate-200",
   },
   speed_boost: {
-    label: "Turbo 1.4x",
-    emoji: "⚡",
-    desc: "Todos corren un 40% más rápido",
-    pillClass: "border-cyan-400/60 bg-cyan-500/20 text-cyan-200",
-    bannerGradient: "from-cyan-600/90 via-sky-900/95 to-cyan-600/90",
+    code: "OVERDRIVE",
+    label: "Overdrive 1.4x",
+    desc: "Velocidad de desplazamiento aumentada un 40%",
+    accentClass: "border-amber-500/70 text-amber-400",
   },
   ricochet: {
-    label: "Balas Rebotadoras",
-    emoji: "🪃",
-    desc: "Todos los disparos rebotan 2 veces en muros y rocas",
-    pillClass: "border-emerald-400/60 bg-emerald-500/20 text-emerald-200",
-    bannerGradient: "from-emerald-600/90 via-teal-900/95 to-emerald-600/90",
+    code: "RICOCHET",
+    label: "Ricochet Rounds",
+    desc: "Todos los proyectiles rebotan 2 veces en cobertura",
+    accentClass: "border-emerald-500/70 text-emerald-400",
   },
   vampire: {
-    label: "Vampirismo",
-    emoji: "🧛",
-    desc: "+25 HP al eliminar a un rival",
-    pillClass: "border-rose-400/60 bg-rose-500/20 text-rose-200",
-    bannerGradient: "from-rose-600/90 via-red-950/95 to-rose-600/90",
+    code: "VAMPIRE",
+    label: "Vampire Protocol",
+    desc: "Recupera +25 HP por cada baja confirmada",
+    accentClass: "border-rose-500/70 text-rose-400",
   },
   double_damage: {
-    label: "Doble Daño 2x",
-    emoji: "💥",
-    desc: "Todas las armas infligen el doble de daño",
-    pillClass: "border-amber-400/60 bg-amber-500/20 text-amber-200",
-    bannerGradient: "from-amber-600/90 via-orange-950/95 to-amber-600/90",
+    code: "DOUBLE DMG",
+    label: "Double Damage 2x",
+    desc: "Potencia de fuego duplicada en todo el arsenal",
+    accentClass: "border-amber-500/80 text-amber-400",
   },
   hot_potato: {
-    label: "Papa Caliente",
-    emoji: "💣",
-    desc: "¡12s para disparar a otro y pasarle la bomba antes de explotar!",
-    pillClass: "border-orange-400/70 bg-orange-500/25 text-orange-200",
-    bannerGradient: "from-orange-600/95 via-red-900/95 to-amber-600/95",
+    code: "HOT POTATO",
+    label: "Hot Potato",
+    desc: "Carga explosiva de 12s · Impacta a un rival para transferirla",
+    accentClass: "border-red-500/80 text-red-400",
   },
   sniper_zero_g: {
-    label: "Sniper Gravedad Cero",
-    emoji: "🚀",
-    desc: "Todos con Francotirador + retroceso masivo que te lanza volando",
-    pillClass: "border-indigo-400/70 bg-indigo-500/25 text-indigo-200",
-    bannerGradient: "from-indigo-600/95 via-purple-950/95 to-indigo-600/95",
+    code: "SNIPER ZERO-G",
+    label: "Sniper Zero-G",
+    desc: "Francotiradores con retroceso cinético extremo",
+    accentClass: "border-sky-500/80 text-sky-400",
   },
   tiny_shotgun: {
-    label: "Mini Arena Escopetas",
-    emoji: "🔥",
-    desc: "Mapa reducido 900×700 + todos con escopeta rápida",
-    pillClass: "border-red-400/70 bg-red-500/25 text-red-200",
-    bannerGradient: "from-red-600/95 via-rose-950/95 to-orange-600/95",
+    code: "TINY SHOTGUN",
+    label: "Close Quarters",
+    desc: "Perímetro reducido 900×700 · Escopetas de recarga rápida",
+    accentClass: "border-amber-500/80 text-amber-400",
   },
   all_invisible: {
-    label: "Fantasmas Invisibles",
-    emoji: "👻",
-    desc: "Todos invisibles salvo al disparar o pisar aceite/fuego",
-    pillClass: "border-purple-400/70 bg-purple-500/25 text-purple-200",
-    bannerGradient: "from-purple-600/95 via-slate-950/95 to-fuchsia-600/95",
+    code: "STEALTH OPS",
+    label: "All Invisible",
+    desc: "Camuflaje óptico activo salvo al abrir fuego o pisar fluidos",
+    accentClass: "border-violet-500/80 text-violet-300",
   },
   giant_bullets: {
-    label: "Balas Gigantes 4x",
-    emoji: "🟣",
-    desc: "Proyectiles 4x más grandes y lentos estilo Bullet Hell",
-    pillClass: "border-pink-400/70 bg-pink-500/25 text-pink-200",
-    bannerGradient: "from-pink-600/95 via-fuchsia-950/95 to-purple-600/95",
+    code: "GIANT BULLETS",
+    label: "Giant Bullets 4x",
+    desc: "Calibre pesado 4x de baja velocidad",
+    accentClass: "border-amber-500/80 text-amber-300",
   },
 };
 
@@ -244,10 +251,10 @@ export interface EmoteMeta {
 }
 
 export const EMOTE_LIST: EmoteMeta[] = [
-  { id: "laugh", key: "1", icon: "😂", label: "Risa" },
-  { id: "skull", key: "2", icon: "💀", label: "Calavera" },
+  { id: "laugh", key: "1", icon: "😂", label: "Laugh" },
+  { id: "skull", key: "2", icon: "💀", label: "Skull" },
   { id: "gg", key: "3", icon: "GG", label: "GG" },
-  { id: "chicken", key: "4", icon: "🐔", label: "Gallina" },
+  { id: "chicken", key: "4", icon: "🐔", label: "Chicken" },
 ];
 
 export const EMOTE_BY_ID: Record<EmoteType, EmoteMeta> = {

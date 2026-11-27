@@ -12,8 +12,8 @@ import {
   ABILITY_ORDER,
   ABILITY_STORAGE_KEY,
   COLOR_STORAGE_KEY,
-  NEON_COLORS,
   NICKNAME_STORAGE_KEY,
+  TACTICAL_COLORS,
 } from "./constants";
 import {
   colyseusClient,
@@ -40,10 +40,10 @@ function getInitialAbility(): AbilityType {
 
 export const App: React.FC = () => {
   const [nickname, setNickname] = useState<string>(
-    () => localStorage.getItem(NICKNAME_STORAGE_KEY) || "Jugador"
+    () => localStorage.getItem(NICKNAME_STORAGE_KEY) || "OPERATOR"
   );
   const [selectedColor, setSelectedColor] = useState<string>(
-    () => localStorage.getItem(COLOR_STORAGE_KEY) || NEON_COLORS[0].hex
+    () => localStorage.getItem(COLOR_STORAGE_KEY) || TACTICAL_COLORS[0].hex
   );
   const [selectedAbility, setSelectedAbility] = useState<AbilityType>(() =>
     getInitialAbility()
@@ -60,7 +60,11 @@ export const App: React.FC = () => {
 
   const [localMode, setLocalMode] = useState(false);
   const [localModifier, setLocalModifier] = useState<RoundModifier>("normal");
-  const [localMapDims, setLocalMapDims] = useState({ w: 1600, h: 1200, storm: 1100 });
+  const [localMapDims, setLocalMapDims] = useState({
+    w: 1600,
+    h: 1200,
+    storm: 1100,
+  });
   const [localPlayers, setLocalPlayers] = useState<Record<string, PlayerState>>(
     {}
   );
@@ -69,16 +73,17 @@ export const App: React.FC = () => {
   >({});
 
   const localArenaRef = useRef<LocalArena | null>(null);
+  const bgMenuArenaRef = useRef<LocalArena | null>(null);
   const inputManagerRef = useRef<InputManager | null>(null);
   const autoJoinedRef = useRef(false);
   const killSeqRef = useRef(0);
 
   const pushKillFeed = useCallback((ev: KillFeedEvent) => {
     const id = `kf_${++killSeqRef.current}_${Date.now()}`;
-    setKillFeed((prev) => [{ ...ev, id }, ...prev].slice(0, 5));
+    setKillFeed((prev) => [{ ...ev, id }, ...prev].slice(0, 3));
     window.setTimeout(() => {
       setKillFeed((prev) => prev.filter((item) => item.id !== id));
-    }, 5500);
+    }, 5000);
   }, []);
 
   const handleNicknameChange = (name: string) => {
@@ -130,15 +135,15 @@ export const App: React.FC = () => {
     setLoading(true);
     try {
       await colyseusClient.createRoom(
-        nickname.trim() || "Jugador",
+        nickname.trim() || "OPERATOR",
         selectedColor,
         selectedAbility
       );
     } catch (err) {
       setError(
         err instanceof Error && err.message
-          ? `No se pudo crear la sala: ${err.message}`
-          : "No se pudo conectar con el servidor."
+          ? `Connection failed: ${err.message}`
+          : "Unable to reach game server."
       );
     } finally {
       setLoading(false);
@@ -151,15 +156,15 @@ export const App: React.FC = () => {
     try {
       await colyseusClient.joinRoomByCode(
         code,
-        nickname.trim() || "Jugador",
+        nickname.trim() || "OPERATOR",
         selectedColor,
         selectedAbility
       );
     } catch (err) {
       setError(
         err instanceof Error && err.message
-          ? `No se pudo unir a la sala ${code}: ${err.message}`
-          : `No se pudo unir a la sala ${code}.`
+          ? `Could not join room ${code}: ${err.message}`
+          : `Could not join room ${code}.`
       );
     } finally {
       setLoading(false);
@@ -182,7 +187,7 @@ export const App: React.FC = () => {
     setLocalPlayers({
       "local-player": {
         id: "local-player",
-        name: nickname.trim() || "Jugador",
+        name: nickname.trim() || "OPERATOR",
         x: 170,
         y: 170,
         angle: 0,
@@ -257,7 +262,7 @@ export const App: React.FC = () => {
     []
   );
 
-  // 1. Modo de Prueba Local (Sin Servidor)
+  // 1. Modo Práctica Local Activo (SOLO PRACTICE // BOTS)
   if (localMode) {
     return (
       <div className="relative h-screen w-screen overflow-hidden bg-slate-950">
@@ -288,6 +293,7 @@ export const App: React.FC = () => {
           }}
         />
         <GameCanvas
+          key="active-local-arena"
           mode="local"
           mapWidth={localMapDims.w}
           mapHeight={localMapDims.h}
@@ -312,49 +318,95 @@ export const App: React.FC = () => {
     );
   }
 
-  // 2. Pantalla de Inicio
+  // 2. Pantalla Principal con Arena PixiJS Viva de Fondo
   if (!snapshot) {
     return (
-      <HomeScreen
-        nickname={nickname}
-        selectedColor={selectedColor}
-        selectedAbility={selectedAbility}
-        initialRoomCode={initialRoomCode}
-        loading={loading}
-        error={error}
-        onNicknameChange={handleNicknameChange}
-        onColorChange={handleColorChange}
-        onAbilityChange={handleAbilityChange}
-        onCreateRoom={() => void handleCreateRoom()}
-        onJoinRoom={(code) => void handleJoinRoom(code)}
-        onStartLocalMode={handleStartLocalMode}
-      />
+      <div className="relative h-screen w-screen overflow-hidden bg-slate-950">
+        <div className="pointer-events-none fixed inset-0 z-0">
+          <GameCanvas
+            key="menu-background-arena"
+            mode="local"
+            mapWidth={1600}
+            mapHeight={1200}
+            stormRadius={1100}
+            stormX={800}
+            stormY={600}
+            modifier="normal"
+            obstacles={{}}
+            hazardZones={{}}
+            lootItems={{}}
+            players={{}}
+            bullets={{}}
+            localSessionId="preview-observer"
+            localAbility={selectedAbility}
+            isPlaying={false}
+            localArenaRef={bgMenuArenaRef}
+          />
+        </div>
+
+        <HomeScreen
+          nickname={nickname}
+          selectedColor={selectedColor}
+          selectedAbility={selectedAbility}
+          initialRoomCode={initialRoomCode}
+          loading={loading}
+          error={error}
+          onNicknameChange={handleNicknameChange}
+          onColorChange={handleColorChange}
+          onAbilityChange={handleAbilityChange}
+          onCreateRoom={() => void handleCreateRoom()}
+          onJoinRoom={(code) => void handleJoinRoom(code)}
+          onStartLocalMode={handleStartLocalMode}
+        />
+      </div>
     );
   }
 
-  // 3. Sala de Espera (Lobby)
+  // 3. Sala de Espera (Lobby) con la Arena Real de la Sala Viva de Fondo
   if (snapshot.status === "waiting") {
     return (
-      <LobbyScreen
-        roomCode={snapshot.roomCode}
-        sessionId={snapshot.sessionId}
-        players={snapshot.players}
-        onToggleReady={() => colyseusClient.toggleReady()}
-        onStartGame={() => colyseusClient.startGame()}
-        onUpdateColor={(color) => {
-          handleColorChange(color);
-          colyseusClient.updateProfile({ color });
-        }}
-        onUpdateAbility={(ability) => {
-          handleAbilityChange(ability);
-          colyseusClient.updateProfile({ ability });
-        }}
-        onLeaveRoom={() => void handleLeave()}
-      />
+      <div className="relative h-screen w-screen overflow-hidden bg-slate-950">
+        <div className="pointer-events-none fixed inset-0 z-0">
+          <GameCanvas
+            key="lobby-background-arena"
+            mode="online"
+            mapWidth={snapshot.mapWidth}
+            mapHeight={snapshot.mapHeight}
+            stormRadius={snapshot.stormRadius}
+            stormX={snapshot.stormX}
+            stormY={snapshot.stormY}
+            modifier={snapshot.modifier}
+            obstacles={snapshot.obstacles}
+            hazardZones={snapshot.hazardZones}
+            lootItems={snapshot.lootItems}
+            players={snapshot.players}
+            bullets={snapshot.bullets}
+            localSessionId={snapshot.sessionId}
+            isPlaying={false}
+          />
+        </div>
+
+        <LobbyScreen
+          roomCode={snapshot.roomCode}
+          sessionId={snapshot.sessionId}
+          players={snapshot.players}
+          onToggleReady={() => colyseusClient.toggleReady()}
+          onStartGame={() => colyseusClient.startGame()}
+          onUpdateColor={(color) => {
+            handleColorChange(color);
+            colyseusClient.updateProfile({ color });
+          }}
+          onUpdateAbility={(ability) => {
+            handleAbilityChange(ability);
+            colyseusClient.updateProfile({ ability });
+          }}
+          onLeaveRoom={() => void handleLeave()}
+        />
+      </div>
     );
   }
 
-  // 4. Arena Multijugador Online
+  // 4. Arena Multijugador Online en Combate
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-slate-950">
       <GameHUD
@@ -372,6 +424,7 @@ export const App: React.FC = () => {
         onTriggerAbility={handleTriggerAbility}
       />
       <GameCanvas
+        key="online-combat-arena"
         mode="online"
         mapWidth={snapshot.mapWidth}
         mapHeight={snapshot.mapHeight}
